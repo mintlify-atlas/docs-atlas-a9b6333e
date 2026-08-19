@@ -1,0 +1,191 @@
+---
+title: "Managing Your Profile: Name, Photo, and Password"
+sidebarTitle: "Profile"
+description: "Every HelpDesk Pro 2026 user can update their display name, upload a profile photo to Supabase Storage, and change their password from one unified form."
+---
+
+Every authenticated user in HelpDesk Pro 2026 has a profile page where they can update their display name, replace their avatar, and change their password — all from the same form at `/Users/Profile`. Email address and role are read-only fields managed externally (by Supabase Auth and a SUPERUSUARIO respectively) and cannot be changed from the profile page.
+
+## Viewing the Profile
+
+<Steps>
+  <Step title="Navigate to your profile">
+    Visit `GET /Users/Profile` while logged in. The controller reads `UserId` and `AccessToken` from the session — if either value is missing or the user record cannot be found in the `users` table, you are redirected to `/Account/Login` and the session is cleared.
+  </Step>
+  <Step title="Profile data is loaded">
+    `UserService.ObtenerPorId()` fetches the current user's row from Supabase and populates the `EditProfileViewModel` with `FullName`, `Email`, `Role`, and `PhotoUrl`.
+  </Step>
+  <Step title="Form is displayed">
+    The profile view renders the avatar, an editable name field, read-only email and role fields, and an optional password-change section.
+  </Step>
+</Steps>
+
+## The EditProfileViewModel
+
+The form is bound to `EditProfileViewModel`, which carries all profile fields in a single round-trip:
+
+<ParamField body="FullName" type="string" required>
+  The user's display name shown across the application. Cannot be blank.
+</ParamField>
+
+<ParamField body="Email" type="string">
+  Read-only. Displayed for reference but not submitted — email is managed by Supabase Authentication.
+</ParamField>
+
+<ParamField body="Role" type="string">
+  Read-only. Displayed for reference only — roles are managed by a SUPERUSUARIO from the admin panel.
+</ParamField>
+
+<ParamField body="PhotoUrl" type="string">
+  The public URL of the user's current avatar, stored in the `photo_url` column of the `users` table.
+</ParamField>
+
+<ParamField body="Photo" type="IFormFile">
+  The new profile photo upload. Optional — leave empty to keep the current photo.
+</ParamField>
+
+<ParamField body="CurrentPassword" type="string">
+  Required when changing the password. Used to re-authenticate against Supabase before applying the update.
+</ParamField>
+
+<ParamField body="NewPassword" type="string">
+  The desired new password. Minimum 6 characters.
+</ParamField>
+
+<ParamField body="ConfirmPassword" type="string">
+  Must match `NewPassword` exactly before the change is submitted.
+</ParamField>
+
+## Updating Your Display Name
+
+Submitting the form with a changed `FullName` calls `UserService.ActualizarPerfil()`, which fetches the current record, updates the `full_name` column, and persists it back through the Supabase Postgrest client:
+
+```csharp
+// Services/UserService.cs
+public async Task<Usuario?> ActualizarPerfil(
+    Guid userId,
+    string fullName,
+    string? photoUrl)
+{
+    var usuario = await ObtenerPorId(userId);
+    if (usuario == null) return null;
+
+    usuario.FullName = fullName;
+
+    if (!string.IsNullOrEmpty(photoUrl))
+        usuario.PhotoUrl = photoUrl;
+
+    await _client.From<Usuario>().Update(usuario);
+    return usuario;
+}
+```
+
+After a successful save, the session keys `FullName`, `Email`, `Role`, and `PhotoUrl` are refreshed so the UI reflects the new values immediately — without requiring a re-login.
+
+## Uploading a Profile Photo
+
+Profile photos are stored in the `profile-photos` bucket in Supabase Storage. The upload is handled by `StorageService.UploadProfilePhoto()`.
+
+**Constraints enforced before upload:**
+
+| Constraint | Value |
+|---|---|
+| Allowed formats | `.jpg`, `.jpeg`, `.png`, `.webp` |
+| Maximum file size | 5 MB |
+
+**What happens during upload:**
+
+<Steps>
+  <Step title="Session tokens are verified">
+    Both `AccessToken` and `RefreshToken` must be present in the session. If either is missing, an error is added to the model and the upload is aborted.
+  </Step>
+  <Step title="Auth session is restored">
+    `_client.Auth.SetSession(accessToken, refreshToken)` re-establishes the authenticated Supabase context so the Storage SDK has permission to write to the bucket.
+  </Step>
+  <Step title="File is uploaded">
+    The file is read into a `MemoryStream` and uploaded as `{userId}{extension}` (e.g., `3fa85f64-5717-4562-b3fc-2c963f66afa6.png`). The `Upsert = true` option ensures a re-upload silently replaces any existing file for that user.
+
+    ```csharp
+    // Services/StorageService.cs
+    var fileName = $"{userId}{extension}";
+
+    await _client.Storage
+        .From(BUCKET_NAME)
+        .Upload(
+            fileBytes,
+            fileName,
+            new Supabase.Storage.FileOptions { Upsert = true }
+        );
+    ```
+  </Step>
+  <Step title="Public URL is saved">
+    After upload, `GetPublicUrl(fileName)` retrieves the permanent public URL, which is then written to the `photo_url` column via `UserService.ActualizarFoto()`.
+
+    ```csharp
+    // Services/StorageService.cs
+    var publicUrl = _client.Storage
+        .From(BUCKET_NAME)
+        .GetPublicUrl(fileName);
+
+    return publicUrl;
+    ```
+  </Step>
+  <Step title="Session is updated">
+    The new `PhotoUrl` is stored in the session under the `PhotoUrl` key so the avatar in the navigation bar updates without a re-login.
+  </Step>
+</Steps>
+
+<Warning>
+  If the Supabase `AccessToken` is missing from the session — for example, because the session expired — the photo upload will fail with the explicit message: **"La sesión de Supabase ha expirado. Cierra sesión e inicia sesión nuevamente."** Sign out and sign back in to refresh the token, then retry the upload.
+</Warning>
+
+## Changing Your Password
+
+The password change section is optional — if all three password fields are left blank, the form saves only the name and photo changes. To change the password, all three fields must be filled in.
+
+**Validation rules:**
+
+- `CurrentPassword` is required when `NewPassword` is provided
+- `NewPassword` must be at least **6 characters**
+- `ConfirmPassword` must match `NewPassword` exactly
+
+The change is performed by `AuthService.CambiarPasswordAsync()`, which first verifies the current password by calling `SignIn`, then calls `Auth.Update` with the new password:
+
+```csharp
+// Services/AuthService.cs
+public async Task<bool> CambiarPasswordAsync(
+    string email,
+    string currentPassword,
+    string newPassword)
+{
+    try
+    {
+        // Verify current password is correct
+        await _client.Auth.SignIn(email, currentPassword);
+
+        // Apply the new password
+        await _client.Auth.Update(
+            new Supabase.Gotrue.UserAttributes
+            {
+                Password = newPassword
+            }
+        );
+
+        return true;
+    }
+    catch
+    {
+        return false;
+    }
+}
+```
+
+If `CambiarPasswordAsync` returns `false` (the current password was wrong or the Supabase call failed), a validation error is added to the `CurrentPassword` field and the form is re-displayed without any changes applied.
+
+<Tip>
+  Name, photo, and password updates are processed in sequence within a single form submission. If the name update succeeds but the photo upload fails, the name change is still saved. Each section is independent — a partial failure does not roll back earlier successes.
+</Tip>
+
+## Success and Error Feedback
+
+After a fully successful save the controller sets `TempData["Success"]` and redirects back to `GET /Users/Profile`, where the success banner is displayed. Individual field errors (invalid file format, wrong current password, mismatched confirm password, etc.) are surfaced as model-level validation messages directly on the relevant fields.

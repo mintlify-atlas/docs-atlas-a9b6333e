@@ -1,0 +1,130 @@
+---
+title: "Analytics Dashboard: Tickets by Priority"
+sidebarTitle: "Dashboard"
+description: "The HelpDesk Pro 2026 dashboard uses EF Core and Chart.js to display total ticket counts and a live priority breakdown to authorized staff."
+---
+
+The HelpDesk Pro 2026 dashboard provides a real-time statistical overview of all tickets in the system, rendered as metric cards and an interactive bar chart. It is intentionally restricted to staff roles — only **SOPORTE** and **SUPERUSUARIO** users can access it. Employees attempting to navigate to the dashboard are silently redirected to the ticket list. The data layer is powered by EF Core querying Supabase's PostgreSQL database directly, separate from the Supabase .NET SDK used elsewhere in the application.
+
+## Access Control
+
+The `Dashboard` action in `HomeController` performs a session-based role guard before any database work:
+
+```csharp
+[HttpGet]
+public async Task<IActionResult> Dashboard()
+{
+    var userId   = HttpContext.Session.GetString("UserId");
+    var userRole = HttpContext.Session.GetString("Role");
+
+    if (string.IsNullOrEmpty(userId))
+        return RedirectToAction("Login", "Account");
+
+    if (userRole != "SUPERUSUARIO" && userRole != "SOPORTE")
+        return RedirectToAction("Index", "Tickets");
+
+    // ... data fetch continues
+}
+```
+
+<Tabs>
+  <Tab title="EMPLEADO">
+    Redirected to `GET /Tickets` (the ticket index). No dashboard data is fetched and no error is shown — the redirect is transparent.
+  </Tab>
+  <Tab title="SOPORTE">
+    Full dashboard access. Sees total ticket count and the priority breakdown chart for all tickets in the system.
+  </Tab>
+  <Tab title="SUPERUSUARIO">
+    Full dashboard access. Same view as SOPORTE with system-wide data.
+  </Tab>
+</Tabs>
+
+## Dashboard Metrics
+
+The dashboard currently displays two widgets:
+
+<CardGroup cols={2}>
+  <Card title="Total Tickets" icon="ticket">
+    A summary card showing the total number of tickets registered across all states and all users. Sourced from `tickets.Count` after the EF Core query.
+  </Card>
+  <Card title="Tickets by Priority" icon="chart-bar">
+    A Chart.js bar chart grouping tickets by their priority name. Labels and counts are computed server-side and injected into the view via `ViewBag`.
+  </Card>
+</CardGroup>
+
+## Data Fetching with EF Core
+
+The dashboard controller queries the `tickets` table using `AppDbContext` — a lightweight EF Core `DbContext` that maps only the fields required for analytics (`TicketId`, `PriorityId`, `Subject`, `CreatedAt`) alongside the `EfPriority` entity (`PriorityId`, `Name`, `Color`).
+
+```csharp
+// Fetch all tickets including their priority navigation property
+var tickets = await _context.Tickets
+    .Include(t => t.Priority)
+    .ToListAsync();
+```
+
+After the query, grouping is performed in-memory using LINQ:
+
+```csharp
+var priorityStats = tickets
+    .GroupBy(t => t.Priority != null ? t.Priority.Name : "Sin Prioridad")
+    .Select(g => new
+    {
+        PriorityName = g.Key,
+        Count        = g.Count()
+    })
+    .ToList();
+```
+
+The resulting lists are passed to the view through `ViewBag`:
+
+```csharp
+ViewBag.TotalTickets    = tickets.Count;
+ViewBag.PriorityLabels  = priorityStats.Select(p => p.PriorityName).ToList();
+ViewBag.PriorityData    = priorityStats.Select(p => p.Count).ToList();
+```
+
+## Chart Rendering with Chart.js
+
+The view (`Views/Home/Dashboard.cshtml`) renders a `<canvas>` element and initializes a Chart.js `bar` chart on `DOMContentLoaded`. Labels and data are serialized server-side with `System.Text.Json` and embedded directly into the script block:
+
+```javascript
+const labels = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(priorityLabels));
+const data   = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(priorityData));
+
+new Chart(ctx, {
+    type: 'bar',
+    data: {
+        labels: labels,
+        datasets: [{
+            label: 'Cantidad de Tickets',
+            data: data,
+            backgroundColor: '#003d9b',
+            borderColor:     '#002868',
+            borderWidth: 1,
+            borderRadius: 6
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+            y: { beginAtZero: true, ticks: { precision: 0 } }
+        }
+    }
+});
+```
+
+The chart uses HelpDesk Pro's primary brand colors: `#003d9b` (fill) and `#002868` (border). The legend is hidden since each bar is already labeled on the x-axis by priority name.
+
+## Route Reference
+
+| Method | Route | Description |
+|---|---|---|
+| `GET` | `/Home/Dashboard` | Renders the dashboard view with chart data |
+| `GET` | `/` or `/Home` | Landing page — does not serve dashboard data |
+
+<Note>
+  HelpDesk Pro 2026 uses a **dual data-access pattern**. All ticket CRUD operations, user lookups, and attachment management go through the **Supabase .NET SDK** (Postgrest client). The dashboard is the only feature that uses **EF Core** — it connects directly to the underlying PostgreSQL database using a separate `AppDbContext` and `DbContextOptions` registration. Both paths ultimately read from the same Supabase-hosted database, but through different connection surfaces.
+</Note>

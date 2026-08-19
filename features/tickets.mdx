@@ -1,0 +1,146 @@
+---
+title: "Create, Edit, and Filter Support Tickets"
+sidebarTitle: "Tickets"
+description: "Walk through the full ticket management lifecycle — creating, editing, filtering, and commenting on IT support tickets in HelpDesk Pro 2026."
+---
+
+Tickets are the central unit of work in HelpDesk Pro 2026. Each ticket represents an IT support request submitted by an employee, automatically assigned to a technician, and tracked through a defined state lifecycle until it reaches resolution or cancellation. All ticket data is persisted in Supabase via the Postgrest SDK, with every create and update operation validated server-side against the requester's role and the ticket's current state.
+
+## Creating a Ticket
+
+Any user with the **EMPLEADO** or **SUPERUSUARIO** role can open the creation form at `GET /Tickets/Create`. SOPORTE users are explicitly blocked and redirected to the ticket list with an error message — support technicians manage tickets assigned to them but do not originate new requests.
+
+The form is backed by `CreateTicketViewModel` with the following fields:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `SystemId` | `int` | ✅ | The affected IT system (dropdown) |
+| `CategoryId` | `int` | ✅ | Ticket category (dropdown) |
+| `PriorityId` | `int` | ✅ | Priority level (dropdown) |
+| `RiskId` | `int` | ✅ | Risk level (dropdown) |
+| `Subject` | `string` | ✅ | Max 200 characters |
+| `Description` | `string` | ✅ | Full problem description |
+| `Justification` | `string?` | ❌ | Optional business context |
+| `Attachments` | `List<IFormFile>?` | ❌ | One or more files |
+
+On successful submission (`POST /Tickets/Create`), the service generates a ticket code, auto-assigns a technician, sets the initial state to **1 (PENDIENTE)**, and inserts the record into Supabase.
+
+<Note>
+  SOPORTE users cannot create tickets. Attempting to `GET` or `POST` to `/Tickets/Create` while authenticated as SOPORTE will result in an immediate redirect to the ticket index with an error message.
+</Note>
+
+### Ticket Code Generation
+
+Each ticket receives a unique sequential code in the `TCK-XXXX` format. The service counts all existing tickets in the `tickets` table and increments by one to derive the next code:
+
+```csharp
+private async Task<string> GenerateTicketCodeAsync()
+{
+    var response = await _supabase.From<Ticket>().Get();
+    int count = (response.Models?.Count ?? 0) + 1;
+    return $"TCK-{count:D4}";
+}
+```
+
+This produces codes like `TCK-0001`, `TCK-0042`, `TCK-0150`, and so on.
+
+### Automatic Technician Assignment
+
+New tickets are assigned automatically by `GetAutoAssignedTechAsync()`. The method queries all users with the `SOPORTE` role, counts their currently active tickets (states 1–3, excluding RESUELTO and CANCELADO), and selects the technician with the lowest active workload.
+
+```csharp
+var leastBusyTech = supportUsers
+    .Select(tech => new
+    {
+        TechId = tech.UserId,
+        ActiveCount = activeTickets.Count(t => t.AssignedTo == tech.UserId)
+    })
+    .OrderBy(x => x.ActiveCount)
+    .FirstOrDefault();
+```
+
+If no SOPORTE users exist, the system falls back to the first available SUPERUSUARIO. If neither role has any users, `AssignedTo` is set to `Guid.Empty`.
+
+## Filtering Tickets
+
+The ticket list at `GET /Tickets` accepts the following optional query parameters to narrow results:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `searchUserId` | `Guid?` | Match tickets where requester or assigned tech equals this user ID |
+| `startDate` | `DateTime?` | Show tickets created on or after this date |
+| `endDate` | `DateTime?` | Show tickets created on or before this date |
+| `stateId` | `int?` | Filter by ticket state ID (1–5) |
+| `systemId` | `int?` | Filter by affected system ID |
+
+All filters are applied in-memory after the initial Supabase fetch. Filters are cumulative — multiple parameters narrow the result set further.
+
+<Info>
+  **Role-scoped visibility**: EMPLEADO users only see tickets where they are the requester (`RequesterId == userId`). SOPORTE and SUPERUSUARIO users receive the full ticket list before any filters are applied.
+</Info>
+
+## Editing a Ticket
+
+The edit form at `GET /Tickets/Edit/{id}` serves both editing and viewing purposes. The form is backed by `EditTicketViewModel`, which mirrors the create fields plus metadata:
+
+| Field | Type | Notes |
+|---|---|---|
+| `TicketId` | `long` | Hidden — identifies the record |
+| `TicketCode` | `string` | Read-only display field |
+| `SystemId` | `int` | Editable per role/state rules |
+| `CategoryId` | `int` | Editable per role/state rules |
+| `PriorityId` | `int` | Editable per role/state rules |
+| `RiskId` | `int` | Editable per role/state rules |
+| `Subject` | `string` | Max 200 characters |
+| `Description` | `string` | Required |
+| `Justification` | `string?` | Optional |
+| `ExistingAttachments` | `List<TicketAttachment>` | Populated from database |
+| `NewAttachments` | `List<IFormFile>?` | New files to upload |
+
+**Edit permissions are role- and state-dependent:**
+
+- **EMPLEADO** — may only edit tickets in state **1 (PENDIENTE)**. Once a ticket advances past PENDIENTE, all form fields become read-only for the employee.
+- **SOPORTE** — the form fields are always read-only for SOPORTE users; they interact with tickets through the state control panel, not the edit form.
+- **SUPERUSUARIO** — may edit a ticket in any state with no restrictions.
+
+## Comments
+
+Every ticket has a threaded comment section accessible from the edit/detail view. Comments are stored in the `comments` table in Supabase and ordered by `CreatedAt` ascending.
+
+<Steps>
+  <Step title="Add a comment">
+    Submit a `POST /Tickets/AddComment` request with `ticketId` (long) and `commentText` (string). Any authenticated user can add a comment to any ticket they can access.
+  </Step>
+  <Step title="Edit a comment">
+    Submit a `POST /Tickets/UpdateComment` request with `commentId`, `ticketId`, and `commentText`. The service verifies `comment.UserId == currentUserId` before updating — only the comment author can edit their own comment.
+  </Step>
+  <Step title="Delete a comment">
+    Submit a `POST /Tickets/DeleteComment` request with `commentId` and `ticketId`. The same ownership check applies — only the original author can delete the comment.
+  </Step>
+</Steps>
+
+<Warning>
+  Comment ownership is enforced server-side in `TicketService`. Attempting to update or delete another user's comment returns `false` and the controller displays an error message — no comment is modified.
+</Warning>
+
+## Ticket Model Reference
+
+The following fields are persisted in the `tickets` table. Navigation properties (system, requester, etc.) are populated by the service layer after the initial query.
+
+| Property | Column | Type | Description |
+|---|---|---|---|
+| `TicketId` | `ticket_id` | `long` | Primary key, auto-generated |
+| `TicketCode` | `ticket_code` | `string` | Sequential code, e.g. `TCK-0001` |
+| `SystemId` | `system_id` | `int` | FK → systems catalog |
+| `CategoryId` | `category_id` | `int` | FK → categories catalog |
+| `PriorityId` | `priority_id` | `int` | FK → priorities catalog |
+| `RiskId` | `risk_id` | `int` | FK → risk_levels catalog |
+| `StateId` | `state_id` | `int` | Current state (1–5) |
+| `Subject` | `subject` | `string` | Short title, max 200 chars |
+| `Description` | `description` | `string` | Full problem description |
+| `Justification` | `justification` | `string?` | Optional business context |
+| `RequesterId` | `requester_id` | `Guid` | FK → users (submitting employee) |
+| `AssignedTo` | `assigned_to` | `Guid` | FK → users (assigned technician) |
+| `CreatedAt` | `created_at` | `DateTime` | UTC timestamp at creation |
+| `UpdatedAt` | `updated_at` | `DateTime` | UTC timestamp at last update |
+| `AttachmentUrl` | `attachment_url` | `string?` | Legacy single-attachment URL field |

@@ -1,0 +1,161 @@
+---
+title: "AccountController: Login, Register, and Logout Routes"
+sidebarTitle: "AccountController"
+description: "AccountController handles user authentication — login via Supabase, new account registration, and session-clearing logout in HelpDesk Pro 2026."
+---
+
+`AccountController` manages all authentication flows in HelpDesk Pro 2026. Unlike most controllers in the application, it instantiates `AuthService` and `UserService` directly inside each action rather than receiving them through constructor injection — both services are created from the Supabase singleton obtained via `await SupabClient.GetClient()`. There is no `[Authorize]` attribute on this controller; all routes are publicly accessible by design so unauthenticated users can reach the login and registration pages.
+
+---
+
+## GET /Account/Login — Login Form
+
+Returns the Login view with an empty `LoginViewModel`.
+
+**Access:** Public (no session required).
+
+**Behavior:** Renders the login form. If the user is already authenticated, the view does not auto-redirect — redirection after successful login is handled by the POST handler.
+
+---
+
+## POST /Account/Login — Authenticate User
+
+Validates credentials against Supabase Auth and establishes a server-side session.
+
+**Access:** Public. CSRF protection via `[ValidateAntiForgeryToken]`.
+
+**Body:** `LoginViewModel`
+
+<ParamField body="Email" type="string" required={true}>
+  The user's registered email address.
+</ParamField>
+
+<ParamField body="Password" type="string" required={true}>
+  The user's password.
+</ParamField>
+
+**Flow:**
+
+<Steps>
+  <Step title="Model validation">
+    If `ModelState` is invalid (e.g., empty fields), the Login view is returned immediately with validation errors.
+  </Step>
+  <Step title="Supabase authentication">
+    Creates an `AuthService` from the Supabase client and calls `AuthService.LoginAsync(email, password)`. If the returned session is `null` or `session.User` is `null`, the error `"Correo o contraseña incorrectos."` is added to `ModelState` and the view is returned.
+  </Step>
+  <Step title="Profile lookup">
+    Parses `session.User.Id` as a `Guid` and calls `UserService.ObtenerPorId(userId)` to load the `Usuario` profile row. If the profile row does not exist (authenticated user with no database record), the error `"El usuario está autenticado pero no tiene un perfil registrado."` is added to `ModelState`.
+  </Step>
+  <Step title="Session hydration">
+    Writes 7 session keys using `HttpContext.Session.SetString()`. See the session key reference below.
+  </Step>
+  <Step title="Redirect">
+    Redirects to `Tickets/Index` (`/Tickets`).
+  </Step>
+</Steps>
+
+<Note>
+  The session stores exactly **7 keys** after a successful login:
+
+  | Key             | Value source                        | Notes                                          |
+  |-----------------|-------------------------------------|------------------------------------------------|
+  | `UserId`        | `usuario.UserId.ToString()`         | String representation of the user's `Guid`     |
+  | `FullName`      | `usuario.FullName`                  |                                                |
+  | `Email`         | `usuario.Email`                     |                                                |
+  | `Role`          | `usuario.Role`                      | One of: `EMPLEADO`, `SOPORTE`, `SUPERUSUARIO`  |
+  | `PhotoUrl`      | `usuario.PhotoUrl ?? ""`            | Empty string if no photo is set                |
+  | `AccessToken`   | `session.AccessToken`               | Supabase JWT — required for Storage uploads    |
+  | `RefreshToken`  | `session.RefreshToken`              | Used to re-authenticate the Supabase client    |
+
+  All 7 keys are set at login and completely cleared via `HttpContext.Session.Clear()` on logout.
+</Note>
+
+**Error cases:**
+
+<CardGroup cols={2}>
+  <Card title="Invalid credentials" icon="lock">
+    Supabase returns a null session or null user. Model error: `"Correo o contraseña incorrectos."`
+  </Card>
+  <Card title="Missing profile row" icon="user-slash">
+    Authentication succeeds but no matching `Usuario` record exists in the database. Model error: `"El usuario está autenticado pero no tiene un perfil registrado."`
+  </Card>
+</CardGroup>
+
+---
+
+## GET /Account/Register — Registration Form
+
+Returns the Register view with an empty `RegisterViewModel`.
+
+**Access:** Public (no session required).
+
+**Behavior:** Renders the account registration form. No pre-population occurs.
+
+---
+
+## POST /Account/Register — Create New Account
+
+Registers a new user in Supabase Auth and creates the associated profile.
+
+**Access:** Public. CSRF protection via `[ValidateAntiForgeryToken]`.
+
+**Body:** `RegisterViewModel`
+
+<ParamField body="Name" type="string" required={true}>
+  The user's full display name. Passed to Supabase as `full_name` in the `SignUpOptions.Data` dictionary.
+</ParamField>
+
+<ParamField body="Email" type="string" required={true}>
+  The email address for the new account.
+</ParamField>
+
+<ParamField body="Password" type="string" required={true}>
+  The account password.
+</ParamField>
+
+**Flow:**
+
+<Steps>
+  <Step title="Model validation">
+    If `ModelState` is invalid, the Register view is returned with validation errors.
+  </Step>
+  <Step title="Supabase registration">
+    Calls `AuthService.RegisterAsync(email, password, name)`. Internally, the service passes `name` as `full_name` in the Supabase `SignUpOptions.Data` dictionary so the display name is stored in the Supabase Auth user record from creation.
+  </Step>
+  <Step title="Session validation">
+    If `session == null`, adds a model error: `"Supabase no devolvió una sesión después del registro."` If `session.User == null`, adds: `"Supabase no devolvió el usuario."`
+  </Step>
+  <Step title="Redirect to login">
+    On success, redirects to `GET /Account/Login`. No session is established — the user must log in explicitly after registering.
+  </Step>
+</Steps>
+
+<Info>
+  Registration does not auto-login the user. After a successful `POST /Account/Register`, the browser is redirected to the login page where the user must authenticate with their new credentials.
+</Info>
+
+---
+
+## GET /Account/Logout — End Session
+
+Terminates the Supabase Auth session and clears all local session data.
+
+**Access:** Any authenticated user (or any user — no session guard is enforced).
+
+**Flow:**
+
+<Steps>
+  <Step title="Supabase sign-out">
+    Calls `AuthService.LogoutAsync()` using a fresh Supabase client. This is wrapped in a `try/catch` — if the call fails (e.g., expired token, network error), the error is logged to `Console` only and **does not block** the local logout from proceeding.
+  </Step>
+  <Step title="Session clear">
+    Calls `HttpContext.Session.Clear()`, which removes all 7 session keys set at login.
+  </Step>
+  <Step title="Redirect">
+    Redirects to `GET /Account/Login`.
+  </Step>
+</Steps>
+
+<Tip>
+  Because the Supabase sign-out is best-effort, the local session is always cleared even if the remote call fails. Users will always be returned to the login page after visiting `/Account/Logout`.
+</Tip>

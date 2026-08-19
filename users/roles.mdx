@@ -1,0 +1,126 @@
+---
+title: "User Roles and Access Permissions in HelpDesk Pro"
+sidebarTitle: "Roles"
+description: "HelpDesk Pro 2026 has three roles — EMPLEADO, SOPORTE, and SUPERUSUARIO — each with distinct permissions for tickets, dashboard, and admin."
+---
+
+HelpDesk Pro 2026 uses a straightforward three-tier role system to control what each user can see and do. Every account belongs to exactly one role — `EMPLEADO`, `SOPORTE`, or `SUPERUSUARIO` — and that role governs access to ticket operations, the analytics dashboard, and the user administration panel. Roles are assigned at the account level and take effect immediately the next time a user signs in.
+
+## Role Comparison
+
+| Feature | EMPLEADO | SOPORTE | SUPERUSUARIO |
+|---|:---:|:---:|:---:|
+| Create tickets | ✓ | ✗ | ✓ |
+| View own tickets | ✓ | All | All |
+| Edit tickets (state 1 only) | ✓ | ✓ | ✓ |
+| Update ticket state | ✗ | ✓ | ✓ |
+| Add / edit / delete comments | ✓ (own) | ✓ (own) | ✓ (own) |
+| View dashboard | ✗ | ✓ | ✓ |
+| Manage user roles | ✗ | ✗ | ✓ |
+| Upload profile photo | ✓ | ✓ | ✓ |
+
+## Role Descriptions
+
+<CardGroup cols={3}>
+  <Card title="EMPLEADO" icon="user">
+    The default role assigned to every new account. Employees open tickets for the issues they need resolved, track progress on their own submissions, and manage their own profile. They cannot see other users' tickets or access the analytics dashboard.
+  </Card>
+  <Card title="SOPORTE" icon="headset">
+    Support technicians are automatically assigned new tickets via the load-balancing algorithm. They can update ticket states along the workflow, add comments to any ticket they are assigned, and view the full analytics dashboard.
+  </Card>
+  <Card title="SUPERUSUARIO" icon="shield-check">
+    Administrators have full visibility across all tickets and users. In addition to all SOPORTE capabilities, they can access the user administration panel to promote or demote other accounts between the EMPLEADO and SOPORTE roles.
+  </Card>
+</CardGroup>
+
+## How Roles Are Stored
+
+Roles are persisted as plain strings in the `role` column of the `users` table in Supabase. The three accepted values are:
+
+```text
+EMPLEADO
+SOPORTE
+SUPERUSUARIO
+```
+
+The `Usuario` model maps this column directly:
+
+```csharp
+// Models/Usuario.cs
+[Table("users")]
+public class Usuario : BaseModel
+{
+    [PrimaryKey("user_id", false)]
+    public Guid UserId { get; set; }
+
+    [Column("full_name")]
+    public string FullName { get; set; } = string.Empty;
+
+    [Column("email")]
+    public string Email { get; set; } = string.Empty;
+
+    [Column("role")]
+    public string Role { get; set; } = string.Empty;
+
+    [Column("photo_url")]
+    public string? PhotoUrl { get; set; }
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; }
+}
+```
+
+## Registration and Role Assignment
+
+All new accounts self-register through the public registration form at `/Account/Register`. The `AuthService.RegisterAsync()` method passes the user's full name as Supabase Auth metadata, and a database trigger (or post-registration hook) creates the matching row in the `users` table with the default role:
+
+```csharp
+// Services/AuthService.cs
+public async Task<Session?> RegisterAsync(
+    string email,
+    string password,
+    string fullName)
+{
+    var options = new Supabase.Gotrue.SignUpOptions
+    {
+        Data = new Dictionary<string, object>
+        {
+            { "full_name", fullName }
+        }
+    };
+
+    return await _client.Auth.SignUp(email, password, options);
+}
+```
+
+After registration, the user is redirected to `/Account/Login`. A SUPERUSUARIO must then visit the admin panel to elevate the account to `SOPORTE` or `SUPERUSUARIO` if needed.
+
+## Runtime Role Checks
+
+Role enforcement happens at the controller level by reading from the server-side session. After a successful login, the user's role is stored in the session and checked on every protected action:
+
+```csharp
+// Example from UsersController.cs — admin panel guard
+var role = HttpContext.Session.GetString("Role");
+
+if (!string.Equals(role, "SUPERUSUARIO", StringComparison.OrdinalIgnoreCase))
+{
+    return RedirectToAction("Dashboard", "Home");
+}
+```
+
+The session stores the following keys after login:
+
+| Session Key | Value |
+|---|---|
+| `UserId` | User's UUID (Guid) |
+| `FullName` | Display name |
+| `Email` | Email address |
+| `Role` | `EMPLEADO`, `SOPORTE`, or `SUPERUSUARIO` |
+| `PhotoUrl` | Public URL of the profile photo |
+| `AccessToken` | Supabase JWT access token |
+| `RefreshToken` | Supabase refresh token |
+
+<Note>
+  A SUPERUSUARIO cannot change their own role. This is enforced in the admin controller by comparing the target `userId` in the request against the `UserId` stored in the current session — if they match, the operation is rejected and the user sees an error message.
+</Note>

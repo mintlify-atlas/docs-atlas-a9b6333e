@@ -1,0 +1,304 @@
+---
+title: "TicketsController: All Ticket Endpoints Reference"
+sidebarTitle: "TicketsController"
+description: "Complete endpoint reference for TicketsController — list, create, edit, state update, comment management, and attachment deletion in HelpDesk Pro 2026."
+---
+
+`TicketsController` handles all ticket-related HTTP requests in HelpDesk Pro 2026. It is the largest controller in the application and depends on `ITicketService`, which is injected via constructor. All user context — identity and role — is resolved at runtime by the private `GetCurrentUserContext()` helper, which reads from ASP.NET Core Claims and the server-side session.
+
+## User Context Helper
+
+The private `GetCurrentUserContext()` method is called at the top of every action that needs to know who is making the request. It returns a `(Guid userId, string role)` tuple.
+
+```csharp
+private (Guid userId, string role) GetCurrentUserContext()
+{
+    var userIdStr = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                 ?? User.FindFirstValue("sub")
+                 ?? HttpContext.Session.GetString("UserId");
+
+    var role = User.FindFirstValue(ClaimTypes.Role)
+            ?? User.FindFirstValue("role")
+            ?? HttpContext.Session.GetString("Role")
+            ?? HttpContext.Session.GetString("UserRole")
+            ?? "EMPLEADO";
+
+    Guid.TryParse(userIdStr, out var userId);
+    return (userId, role.Trim().ToUpperInvariant());
+}
+```
+
+<Accordion title="Resolution order for userId and role">
+**UserId** is resolved in this order:
+1. `ClaimTypes.NameIdentifier` claim
+2. `"sub"` claim (standard JWT subject)
+3. `Session["UserId"]`
+
+**Role** is resolved in this order:
+1. `ClaimTypes.Role` claim
+2. `"role"` claim
+3. `Session["Role"]`
+4. `Session["UserRole"]`
+5. Falls back to `"EMPLEADO"` if none of the above are set
+
+Both session keys (`"Role"` and `"UserRole"`) are checked to prevent mismatches that can occur when the session is written by different code paths.
+</Accordion>
+
+---
+
+## GET /Tickets — Index
+
+Lists tickets with optional filters. Role determines which tickets are visible.
+
+<ParamField query="searchUserId" type="Guid?" required={false}>
+  Filter by the user who created the ticket. Only respected for SOPORTE and SUPERUSUARIO roles.
+</ParamField>
+
+<ParamField query="startDate" type="DateTime?" required={false}>
+  Lower bound for ticket creation date (inclusive).
+</ParamField>
+
+<ParamField query="endDate" type="DateTime?" required={false}>
+  Upper bound for ticket creation date (inclusive).
+</ParamField>
+
+<ParamField query="stateId" type="int?" required={false}>
+  Filter by ticket state ID (1–5).
+</ParamField>
+
+<ParamField query="systemId" type="int?" required={false}>
+  Filter by the associated system ID.
+</ParamField>
+
+**Access:** All authenticated roles.
+
+**Behavior:** Calls `ITicketService.GetTicketsAsync(userId, role, ...)`. The service applies row-level filtering — EMPLEADO sees only their own tickets; SOPORTE and SUPERUSUARIO see all tickets across the system. The action then populates `ViewBag` for filter dropdowns:
+
+| ViewBag key     | Type                  | Source                              |
+|-----------------|-----------------------|-------------------------------------|
+| `Users`         | `SelectList`          | `GetUsersAsync()`                   |
+| `States`        | `SelectList`          | `GetTicketStatesAsync()`            |
+| `Systems`       | `SelectList`          | `GetSystemsAsync()`                 |
+| `SearchUserId`  | `Guid?`               | Echo of query param                 |
+| `StartDate`     | `string` (yyyy-MM-dd) | Echo of query param                 |
+| `EndDate`       | `string` (yyyy-MM-dd) | Echo of query param                 |
+| `StateId`       | `int?`                | Echo of query param                 |
+| `SystemId`      | `int?`                | Echo of query param                 |
+| `UserRole`      | `string`              | From `GetCurrentUserContext()`      |
+
+---
+
+## GET /Tickets/Create — Create Form
+
+Returns the empty ticket creation form.
+
+**Access:** EMPLEADO and SUPERUSUARIO only.
+
+**Behavior:** SOPORTE users are immediately redirected to `/Tickets` and `TempData["ErrorMessage"]` is set to `"Los usuarios de soporte técnico no pueden crear tickets."`. For all other roles, `PopulateDropdownsAsync()` is called to fill the following `ViewBag` SelectLists:
+
+- `ViewBag.Systems` — from `GetSystemsAsync()`
+- `ViewBag.Categories` — from `GetCategoriesAsync()`
+- `ViewBag.Priorities` — from `GetPrioritiesAsync()`
+- `ViewBag.RiskLevels` — from `GetRiskLevelsAsync()`
+- `ViewBag.TicketStates` — from `GetTicketStatesAsync()`
+
+---
+
+## POST /Tickets/Create — Submit New Ticket
+
+Creates a ticket using the submitted form data.
+
+**Access:** EMPLEADO and SUPERUSUARIO only. SOPORTE receives the same redirect as the GET handler.
+
+**Body:** `CreateTicketViewModel` (CSRF token required via `[ValidateAntiForgeryToken]`).
+
+**Behavior:**
+
+<Steps>
+  <Step title="Role guard">
+    SOPORTE is redirected to Index with `TempData["ErrorMessage"]` before model binding is checked.
+  </Step>
+  <Step title="Model validation">
+    If `ModelState` is invalid, dropdowns are repopulated via `PopulateDropdownsAsync()` and the form view is returned with errors.
+  </Step>
+  <Step title="Ticket creation">
+    Calls `ITicketService.CreateTicketAsync(model, userId)`. The service handles auto-assignment (assigns to the SOPORTE user with the fewest active tickets) and generates the ticket code.
+  </Step>
+  <Step title="Success redirect">
+    Sets `TempData["SuccessMessage"]` to `"Ticket {createdTicket.TicketCode} creado exitosamente."` and redirects to `Index`.
+  </Step>
+</Steps>
+
+**Error handling:** Exceptions from the service layer are caught; a model-level error is added and the form is redisplayed with dropdowns intact.
+
+---
+
+## GET /Tickets/Edit/{id} — Edit Form
+
+Loads the ticket edit view for a specific ticket.
+
+<ParamField path="id" type="long" required={true}>
+  The primary key of the ticket to edit.
+</ParamField>
+
+**Behavior:** Calls `ITicketService.GetTicketByIdAsync(id)`. Returns `404 Not Found` if the ticket does not exist. On success, builds an `EditTicketViewModel` and populates the following `ViewBag` entries:
+
+| ViewBag key       | Type                      | Value                                       |
+|-------------------|---------------------------|---------------------------------------------|
+| `UserRole`        | `string`                  | Resolved role string                        |
+| `CurrentUserId`   | `Guid`                    | Resolved user ID                            |
+| `Ticket`          | `Ticket`                  | The full ticket entity                      |
+| `Comments`        | `IEnumerable<Comment>`    | From `GetCommentsByTicketIdAsync(id)`       |
+
+`PopulateDropdownsAsync()` is also called to supply the Systems, Categories, Priorities, RiskLevels, and TicketStates SelectLists to the view.
+
+---
+
+## POST /Tickets/Edit/{id} — Save Ticket Changes
+
+Persists edits to an existing ticket.
+
+<ParamField path="id" type="long" required={true}>
+  The primary key of the ticket to update.
+</ParamField>
+
+**Body:** `EditTicketViewModel` (CSRF token required).
+
+**Behavior:** Calls `ITicketService.UpdateTicketAsync(model, userId, role)`. The service enforces that EMPLEADO can only update tickets whose `StateId == 1` (PENDIENTE). Any other state blocks the edit at the service layer.
+
+<CardGroup cols={2}>
+  <Card title="On success" icon="circle-check">
+    `TempData["SuccessMessage"]` is set to `"Ticket actualizado exitosamente."` and the user is redirected to `Index`.
+  </Card>
+  <Card title="On failure" icon="circle-xmark">
+    `TempData["ErrorMessage"]` is set — either `"No se pudo actualizar el ticket..."` (service returned false) or the exception message — and the user is redirected to `Index`.
+  </Card>
+</CardGroup>
+
+---
+
+## POST /Tickets/UpdateState — Advance Ticket State
+
+Transitions a ticket to a new state. Enforces the application state machine.
+
+<ParamField body="ticketId" type="long" required={true}>
+  The ID of the ticket to update.
+</ParamField>
+
+<ParamField body="newStateId" type="int" required={true}>
+  The target state ID. Must be a valid transition from the ticket's current state.
+</ParamField>
+
+**Access:** SOPORTE and SUPERUSUARIO only.
+
+**Behavior:** Calls `ITicketService.UpdateTicketStateAsync(ticketId, newStateId, userId, role)`. The service calls `IsValidStateTransition()` internally to enforce the following rules:
+
+| Current State | Allowed Next States |
+|---------------|---------------------|
+| 1 PENDIENTE   | 2 EN PROCESO, 5 CANCELADO |
+| 2 EN PROCESO  | 3 EN REVISIÓN, 5 CANCELADO |
+| 3 EN REVISIÓN | 4 RESUELTO, 5 CANCELADO |
+| 4 RESUELTO    | *(terminal — no transitions)* |
+| 5 CANCELADO   | *(terminal — no transitions)* |
+
+Regardless of success or failure, the action redirects back to `Edit` for the same `ticketId`. Success sets `TempData["SuccessMessage"]`; failure sets `TempData["ErrorMessage"]` asking the user to verify workflow rules.
+
+<Warning>
+  Attempting an invalid state transition (e.g., skipping from PENDIENTE directly to RESUELTO) will be rejected by the service layer and surfaced via `TempData["ErrorMessage"]` on the Edit view.
+</Warning>
+
+---
+
+## POST /Tickets/AddComment — Add Comment
+
+Adds a new comment to a ticket.
+
+<ParamField body="ticketId" type="long" required={true}>
+  The ticket to comment on.
+</ParamField>
+
+<ParamField body="commentText" type="string" required={true}>
+  The comment body. Whitespace-only strings are silently skipped.
+</ParamField>
+
+**Access:** All authenticated roles.
+
+**Behavior:** If `commentText` is null, empty, or whitespace, the action skips the service call entirely and redirects to `Edit` without error. Otherwise, calls `ITicketService.AddCommentAsync(ticketId, userId, commentText)` and sets `TempData["SuccessMessage"]` to `"Comentario agregado."`. Always redirects to `Edit/{ticketId}`.
+
+---
+
+## POST /Tickets/UpdateComment — Edit Comment
+
+Updates the text of an existing comment.
+
+<ParamField body="commentId" type="long" required={true}>
+  The primary key of the comment to update.
+</ParamField>
+
+<ParamField body="ticketId" type="long" required={true}>
+  The parent ticket ID — used for the redirect target after the update.
+</ParamField>
+
+<ParamField body="commentText" type="string" required={true}>
+  The new comment text.
+</ParamField>
+
+**Access:** Comment owner only (enforced by the service layer).
+
+**Behavior:** Calls `ITicketService.UpdateCommentAsync(commentId, userId, commentText)`. If the service returns `false` (ownership check failed), `TempData["ErrorMessage"]` is set to `"No tiene permisos para editar este comentario."`. Always redirects to `Edit/{ticketId}`.
+
+---
+
+## POST /Tickets/DeleteComment — Remove Comment
+
+Permanently deletes a comment from a ticket.
+
+<ParamField body="commentId" type="long" required={true}>
+  The primary key of the comment to delete.
+</ParamField>
+
+<ParamField body="ticketId" type="long" required={true}>
+  The parent ticket ID — used for the redirect target.
+</ParamField>
+
+**Access:** Comment owner only (enforced by the service layer).
+
+**Behavior:** Calls `ITicketService.DeleteCommentAsync(commentId, userId)`. If the service returns `false`, `TempData["ErrorMessage"]` is set to `"No tiene permisos para eliminar este comentario."`. Always redirects to `Edit/{ticketId}`.
+
+---
+
+## POST /Tickets/DeleteAttachment — Remove File Attachment
+
+Deletes a file attachment from Supabase Storage and removes the database record.
+
+<ParamField body="attachmentId" type="long" required={true}>
+  The primary key of the attachment to delete.
+</ParamField>
+
+**Access:** All authenticated roles (no explicit role guard).
+
+**Returns:** JSON response (not a redirect).
+
+<Warning>
+  This endpoint does **not** use `[ValidateAntiForgeryToken]`. It is intended to be called from JavaScript (e.g., a fetch/XHR request triggered by a UI delete button), which is why the CSRF middleware is bypassed.
+</Warning>
+
+**Response shape:**
+
+<ResponseField name="success" type="boolean">
+  `true` if the attachment was deleted from both Supabase Storage and the database. `false` if the operation failed.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  A human-readable result message.
+  - Success: `"Archivo eliminado del almacenamiento y registro."`
+  - Failure: `"No se pudo eliminar el archivo."`
+</ResponseField>
+
+```json
+// Success
+{ "success": true, "message": "Archivo eliminado del almacenamiento y registro." }
+
+// Failure
+{ "success": false, "message": "No se pudo eliminar el archivo." }
+```

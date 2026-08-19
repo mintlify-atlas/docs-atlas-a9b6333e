@@ -1,0 +1,223 @@
+---
+title: "UsersController and AdminUsersController Reference"
+sidebarTitle: "UsersController"
+description: "Endpoint reference for UsersController (profile management) and AdminUsersController (SUPERUSUARIO-only role assignment) in HelpDesk Pro 2026."
+---
+
+Two controllers handle user management in HelpDesk Pro 2026. `UsersController` covers both self-service profile editing and SUPERUSUARIO-gated user administration; it receives `UserService`, `StorageService`, `AuthService`, and `UserAdministrationService` through constructor injection. `AdminUsersController` is a legacy alternative for role assignment that uses only `UserService` and writes directly to the database via Postgrest. Both controllers require an active session — requests with no `UserId` in session are redirected to `/Account/Login`. Additionally, `HomeController.Dashboard` is documented here because it serves the analytics entry point for privileged roles.
+
+---
+
+## UsersController
+
+### GET /Users/Profile — View Profile
+
+Loads the authenticated user's profile into the edit form.
+
+**Access:** Any authenticated user (session `UserId` + `AccessToken` required).
+
+**Behavior:**
+
+<Steps>
+  <Step title="Session check">
+    Reads `Session["UserId"]` and `Session["AccessToken"]`. If either is missing, redirects to `/Account/Login`.
+  </Step>
+  <Step title="GUID parse">
+    Parses `UserId` as a `Guid`. If parsing fails, clears the session and redirects to Login.
+  </Step>
+  <Step title="Profile load">
+    Calls `UserService.ObtenerPorId(userGuid)`. If the profile row does not exist, clears the session and redirects to Login.
+  </Step>
+  <Step title="View model">
+    Builds an `EditProfileViewModel` with `FullName`, `Email`, `Role`, and `PhotoUrl` from the `Usuario` record, then returns the Profile view.
+  </Step>
+</Steps>
+
+---
+
+### POST /Users/Profile — Save Profile Changes
+
+Persists profile edits including display name, avatar photo, and optional password change.
+
+**Access:** Any authenticated user. CSRF protection via `[ValidateAntiForgeryToken]`.
+
+**Body:** `EditProfileViewModel`
+
+<ParamField body="FullName" type="string" required={true}>
+  The user's updated display name. Cannot be null or whitespace.
+</ParamField>
+
+<ParamField body="Photo" type="IFormFile" required={false}>
+  An optional new avatar image. Uploaded to the `profile-photos` Supabase Storage bucket.
+</ParamField>
+
+<ParamField body="CurrentPassword" type="string" required={false}>
+  Required only when `NewPassword` is provided. Used to re-authenticate via `AuthService.CambiarPasswordAsync()`.
+</ParamField>
+
+<ParamField body="NewPassword" type="string" required={false}>
+  The desired new password. Minimum 6 characters.
+</ParamField>
+
+<ParamField body="ConfirmPassword" type="string" required={false}>
+  Must match `NewPassword` exactly.
+</ParamField>
+
+**Validation rules (cross-field):**
+
+| Condition | Error field | Message |
+|-----------|-------------|---------|
+| `FullName` is null or whitespace | `FullName` | `"El nombre completo es obligatorio."` |
+| `CurrentPassword` provided but `NewPassword` empty | `NewPassword` | `"Debes ingresar una nueva contraseña."` |
+| `NewPassword` provided but `CurrentPassword` empty | `CurrentPassword` | `"Debes ingresar tu contraseña actual."` |
+| `NewPassword` provided but `ConfirmPassword` empty | `ConfirmPassword` | `"Debes confirmar la nueva contraseña."` |
+| `NewPassword` ≠ `ConfirmPassword` | `ConfirmPassword` | `"Las contraseñas no coinciden."` |
+| `NewPassword.Length < 6` | `NewPassword` | `"La contraseña debe tener al menos 6 caracteres."` |
+
+**Processing steps (after validation passes):**
+
+<Steps>
+  <Step title="Update display name">
+    Calls `UserService.ActualizarPerfil(userGuid, model.FullName, null)`. If the service returns `null`, a model error is added and the view is returned.
+  </Step>
+  <Step title="Upload photo (optional)">
+    If `model.Photo` is provided and non-empty, calls `StorageService.UploadProfilePhoto(userGuid, photo, accessToken, refreshToken)`. The returned URL is then persisted via `UserService.ActualizarFoto(userGuid, photoUrl)`. Requires valid `AccessToken` and `RefreshToken` in session; if either is missing a model error is returned before the upload is attempted.
+  </Step>
+  <Step title="Change password (optional)">
+    If `model.NewPassword` is provided, calls `AuthService.CambiarPasswordAsync(email, currentPassword, newPassword)`. If `false` is returned, a model error is added to `CurrentPassword` and the view is returned.
+  </Step>
+  <Step title="Update session">
+    Updates `Session["FullName"]`, `Session["Email"]`, `Session["Role"]`, and `Session["PhotoUrl"]` to reflect the saved values.
+  </Step>
+  <Step title="Success redirect">
+    Sets `TempData["Success"]` to `"Tu perfil se actualizó correctamente."` and redirects to `GET /Users/Profile`.
+  </Step>
+</Steps>
+
+---
+
+### GET /Users/Index — Manage All Users
+
+Displays a list of all registered users for SUPERUSUARIO administration.
+
+**Access:** SUPERUSUARIO only. Any other role is redirected to `Dashboard` (`/Home/Dashboard`).
+
+**Behavior:** Calls `UserAdministrationService.ObtenerTodosAsync()` and wraps the result in an `AdministrarUsuariosViewModel`. If the service call throws, `TempData["Error"]` is set to `"No se pudieron cargar los usuarios."` and an empty view model is returned.
+
+---
+
+### POST /Users/CambiarRol — Assign User Role
+
+Changes the role of a specific user.
+
+**Access:** SUPERUSUARIO only. CSRF protection via `[ValidateAntiForgeryToken]`.
+
+<ParamField body="userId" type="Guid" required={true}>
+  The ID of the user whose role should be changed.
+</ParamField>
+
+<ParamField body="role" type="string" required={true}>
+  The new role. Must be exactly `"EMPLEADO"` or `"SOPORTE"`. Any other value sets `TempData["Error"]` and redirects to Index.
+</ParamField>
+
+**Behavior:** After role and session validation, calls `UserAdministrationService.CambiarRolAsync(userId, role)`. On success, sets `TempData["Success"]`; on exception, sets `TempData["Error"]`. Always redirects to `GET /Users/Index`.
+
+<Warning>
+  SUPERUSUARIO is not an assignable role through this endpoint. The only valid values for `role` are `"EMPLEADO"` and `"SOPORTE"`. Attempting to assign `"SUPERUSUARIO"` will be rejected with a validation error before the service is called.
+</Warning>
+
+---
+
+## AdminUsersController
+
+`AdminUsersController` is the legacy alternative for user role management. It depends solely on `UserService` (injected via constructor) and writes role changes directly to the database using a Postgrest update rather than a Supabase RPC call.
+
+### GET /AdminUsers — List All Users
+
+Returns a flat list of all `Usuario` records.
+
+**Access:** SUPERUSUARIO only (session `Role` check; redirects to `Dashboard` if not satisfied).
+
+**Behavior:** Calls `UserService.ObtenerUsuarios()` and passes the resulting `List<Usuario>` directly to the view. If the service throws, `TempData["Error"]` is set and an empty `List<Usuario>` is passed to the view.
+
+---
+
+### POST /AdminUsers/UpdateRole — Change User Role (Legacy)
+
+Updates a user's role. Applies stricter validation guards than `UsersController.CambiarRol`.
+
+**Access:** SUPERUSUARIO only. CSRF protection via `[ValidateAntiForgeryToken]`.
+
+<ParamField body="userId" type="Guid" required={true}>
+  The target user's ID. Must not be `Guid.Empty` and must not equal the current session user's ID.
+</ParamField>
+
+<ParamField body="role" type="string" required={true}>
+  The new role. Must be exactly `"EMPLEADO"` or `"SOPORTE"`.
+</ParamField>
+
+**Guard chain (evaluated in order):**
+
+<Steps>
+  <Step title="Session check">
+    `Session["UserId"]` must be non-empty. Missing session → redirect to Login.
+  </Step>
+  <Step title="Role check">
+    `Session["Role"]` must equal `"SUPERUSUARIO"` (exact string, not OrdinalIgnoreCase). Mismatch → redirect to Dashboard.
+  </Step>
+  <Step title="User ID validation">
+    `userId` must not be `Guid.Empty`. Empty GUID → `TempData["Error"]` + redirect to Index.
+  </Step>
+  <Step title="Role value validation">
+    `role` must be `"EMPLEADO"` or `"SOPORTE"`. Invalid value → `TempData["Error"]` + redirect to Index.
+  </Step>
+  <Step title="Self-modification guard">
+    If `userId` equals the current user's parsed GUID from session, the action sets `TempData["Error"]` to `"No puedes modificar tu propio rol."` and redirects to Index without calling the service.
+  </Step>
+  <Step title="Role update">
+    Calls `UserService.CambiarRol(userId, role)`. Returns a `bool`; `false` sets `TempData["Error"]`. On success, sets `TempData["Success"]`.
+  </Step>
+</Steps>
+
+<Note>
+  `AdminUsersController.UpdateRole` uses `UserService.CambiarRol()`, which performs a **direct Postgrest table update** on the `usuarios` table. `UsersController.CambiarRol` uses `UserAdministrationService.CambiarRolAsync()`, which calls a **Supabase RPC function**. Both endpoints achieve the same end result — the user's role record is updated — but via different mechanisms. The AdminUsers route includes the additional self-modification guard that `UsersController.CambiarRol` does not.
+</Note>
+
+---
+
+## HomeController — Dashboard
+
+`HomeController.Dashboard` is documented here because it serves as the primary analytics entry point for privileged users.
+
+### GET /Home/Dashboard — Analytics Dashboard
+
+Displays ticket statistics broken down by priority.
+
+**Access:** SOPORTE and SUPERUSUARIO only. EMPLEADO is redirected to `/Tickets` (Index).
+
+**Behavior:**
+
+<Steps>
+  <Step title="Session and role check">
+    Reads `Session["UserId"]` and `Session["Role"]`. Missing `UserId` → redirect to Login. Role not in `["SUPERUSUARIO", "SOPORTE"]` → redirect to `Tickets/Index`.
+  </Step>
+  <Step title="Data fetch">
+    Calls `AppDbContext.Tickets.Include(t => t.Priority).ToListAsync()` — an EF Core eager-load query that fetches all ticket records with their associated `Priority` navigation property resolved.
+  </Step>
+  <Step title="In-memory grouping">
+    Groups the ticket list in C# (not in SQL) by `Priority.Name`. Tickets with a `null` priority are grouped under `"Sin Prioridad"`.
+  </Step>
+  <Step title="ViewBag population">
+    Passes aggregated data to the Dashboard view:
+
+    | ViewBag key       | Type            | Value                                           |
+    |-------------------|-----------------|-------------------------------------------------|
+    | `TotalTickets`    | `int`           | Total count of all tickets                      |
+    | `PriorityLabels`  | `List<string>`  | Priority names (used as Chart.js axis labels)   |
+    | `PriorityData`    | `List<int>`     | Ticket counts per priority group                |
+  </Step>
+</Steps>
+
+<Info>
+  The Chart.js bar/pie charts rendered on the Dashboard view consume `ViewBag.PriorityLabels` and `ViewBag.PriorityData` directly from JavaScript in the Razor view. No JSON serialization endpoint is involved — the data is embedded in the page at render time.
+</Info>

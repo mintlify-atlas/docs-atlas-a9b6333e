@@ -1,0 +1,83 @@
+---
+title: "HelpDesk Pro 2026: Role-Based IT Ticketing System"
+sidebarTitle: "Introduction"
+description: "A SaaS IT ticketing platform on ASP.NET Core MVC and Supabase, serving employees, support techs, and super admins with role-gated ticket workflows."
+---
+
+HelpDesk Pro 2026 is a web-based IT help desk system designed to streamline the lifecycle of internal support tickets — from submission by an employee to resolution by a support technician and oversight by a super administrator. The platform enforces a strict role hierarchy and a five-state ticket workflow so that every request is tracked, assigned, and resolved in an auditable and consistent way.
+
+## User Roles
+
+The system ships with three distinct roles. Every registered account begins as an **EMPLEADO** and must be elevated by an existing **SUPERUSUARIO**.
+
+<CardGroup cols={3}>
+  <Card title="EMPLEADO" icon="user">
+    Regular employees who open new support tickets, attach files, add comments, and track the status of their own requests.
+  </Card>
+  <Card title="SOPORTE" icon="headset">
+    Support technicians who are auto-assigned incoming tickets, advance ticket states through the workflow, and post resolution notes.
+  </Card>
+  <Card title="SUPERUSUARIO" icon="shield-halved">
+    System administrators who manage user accounts, assign roles, view the analytics dashboard, and have full visibility across all tickets.
+  </Card>
+</CardGroup>
+
+## Ticket Lifecycle
+
+Tickets move through five numbered states with explicit allowed transitions. Terminal states (**RESUELTO** and **CANCELADO**) cannot be reopened.
+
+| State ID | Name        | Allowed Next States       |
+|----------|-------------|---------------------------|
+| 1        | PENDIENTE   | EN PROCESO (2), CANCELADO (5) |
+| 2        | EN PROCESO  | EN REVISIÓN (3), CANCELADO (5) |
+| 3        | EN REVISIÓN | RESUELTO (4), CANCELADO (5) |
+| 4        | RESUELTO    | — (terminal)              |
+| 5        | CANCELADO   | — (terminal)              |
+
+When a new ticket reaches state **PENDIENTE**, the system automatically assigns it to the **SOPORTE** user who currently has the fewest active (non-terminal) tickets.
+
+## Tech Stack
+
+HelpDesk Pro 2026 is built entirely on open-source and cloud-native technologies.
+
+<CardGroup cols={2}>
+  <Card title="ASP.NET Core MVC (.NET 10)" icon="code">
+    Server-rendered views with Razor, controller-based routing, and a scoped service layer. Sessions handle authentication state with a 2-hour idle timeout.
+  </Card>
+  <Card title="Supabase" icon="database">
+    Provides PostgreSQL, the Supabase .NET SDK (Postgrest) for primary data access, Supabase Auth for user identity, and Storage for file attachments and profile photos.
+  </Card>
+  <Card title="EF Core + Npgsql" icon="server">
+    A lightweight EF Core context (`AppDbContext`) connects to the same PostgreSQL database and is used exclusively for the analytics dashboard queries.
+  </Card>
+  <Card title="TailwindCSS + Chart.js" icon="paintbrush">
+    Utility-first CSS powers the responsive UI, while Chart.js renders ticket-volume and priority charts on the SUPERUSUARIO analytics dashboard.
+  </Card>
+</CardGroup>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Auto-Assignment" icon="arrows-rotate">
+    Incoming tickets are automatically assigned to the least-loaded SOPORTE user, ensuring workload balance without manual intervention.
+  </Card>
+  <Card title="File Attachments" icon="paperclip">
+    Tickets support file uploads stored in the `ticket-files` Supabase Storage bucket. Supported by the `StorageService`.
+  </Card>
+  <Card title="Profile Photos" icon="image">
+    Users can upload a custom avatar stored in the `profile-photos` Supabase Storage bucket and managed through their profile page.
+  </Card>
+  <Card title="Analytics Dashboard" icon="chart-bar">
+    SUPERUSUARIO accounts have access to an analytics dashboard powered by EF Core queries and rendered with Chart.js.
+  </Card>
+  <Card title="Role Management" icon="users-gear">
+    SUPERUSUARIO accounts can promote or demote any user's role through the Admin Users panel without touching the database directly.
+  </Card>
+  <Card title="Comment Threads" icon="comments">
+    Every ticket supports a comment thread so that employees and support techs can communicate within the context of a request.
+  </Card>
+</CardGroup>
+
+<Note>
+  The **first account registered** in a fresh deployment is automatically assigned the **EMPLEADO** role. To bootstrap a super admin, a SUPERUSUARIO must either already exist to promote the account through the Admin panel, or you must manually update the `role` column in the `usuarios` table in Supabase directly.
+</Note>

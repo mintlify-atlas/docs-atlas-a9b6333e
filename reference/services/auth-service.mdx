@@ -1,0 +1,182 @@
+---
+title: "AuthService: Registration, Login, and Password Change"
+sidebarTitle: "AuthService"
+description: "AuthService wraps Supabase GoTrue Auth for user registration, sign-in, password update, and sign-out in HelpDesk Pro 2026."
+---
+
+`AuthService` is a thin wrapper around `Supabase.Client.Auth` (GoTrue), the Supabase authentication engine. It exposes four async methods that cover the full authentication lifecycle: account creation, sign-in, password change with current-password verification, and sign-out. All token management and JWT issuance is handled by GoTrue internally — `AuthService` simply calls the appropriate GoTrue method and returns the result to the caller.
+
+## Class Definition
+
+```csharp
+public class AuthService
+{
+    private readonly Supabase.Client _client;
+
+    public AuthService(Supabase.Client client)
+    {
+        _client = client;
+    }
+
+    public async Task<Session?> RegisterAsync(
+        string email,
+        string password,
+        string fullName)
+    {
+        var options = new Supabase.Gotrue.SignUpOptions
+        {
+            Data = new Dictionary<string, object>
+            {
+                { "full_name", fullName }
+            }
+        };
+
+        return await _client.Auth.SignUp(email, password, options);
+    }
+
+    public async Task<Session?> LoginAsync(
+        string email,
+        string password)
+    {
+        var session = await _client.Auth.SignIn(email, password);
+        return session;
+    }
+
+    public async Task<bool> CambiarPasswordAsync(
+        string email,
+        string currentPassword,
+        string newPassword)
+    {
+        try
+        {
+            await _client.Auth.SignIn(email, currentPassword);
+
+            await _client.Auth.Update(
+                new Supabase.Gotrue.UserAttributes
+                {
+                    Password = newPassword
+                }
+            );
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public async Task LogoutAsync()
+    {
+        await _client.Auth.SignOut();
+    }
+}
+```
+
+---
+
+## Methods
+
+### RegisterAsync
+
+Creates a new Supabase Auth account. The `fullName` is passed as metadata inside `SignUpOptions.Data` under the key `"full_name"`, which GoTrue stores in the auth user's metadata and which the application reads back after login to populate the user's profile row.
+
+```csharp
+Task<Session?> RegisterAsync(string email, string password, string fullName)
+```
+
+<ResponseField name="email" type="string" required>
+  The email address for the new account. Must be unique within the Supabase project.
+</ResponseField>
+
+<ResponseField name="password" type="string" required>
+  The password for the new account. Supabase enforces a minimum of 6 characters by default.
+</ResponseField>
+
+<ResponseField name="fullName" type="string" required>
+  The user's display name. Stored in GoTrue user metadata as `full_name` and later written to the `users` table by the profile-creation flow.
+</ResponseField>
+
+**Returns** `Task<Session?>` — the GoTrue `Session` on success, or `null` if sign-up is pending email confirmation (depending on Supabase project settings).
+
+<Note>
+  If your Supabase project requires email confirmation, `RegisterAsync` returns a `Session` where `User` is populated but `AccessToken` may be empty until the user confirms their email. Handle this in the registration controller before writing a profile row.
+</Note>
+
+---
+
+### LoginAsync
+
+Signs in an existing user with email and password using GoTrue's standard credential flow.
+
+```csharp
+Task<Session?> LoginAsync(string email, string password)
+```
+
+<ResponseField name="email" type="string" required>
+  The account email address.
+</ResponseField>
+
+<ResponseField name="password" type="string" required>
+  The account password.
+</ResponseField>
+
+**Returns** `Task<Session?>` — a GoTrue `Session` containing `AccessToken`, `RefreshToken`, and a `User` object with metadata. Returns `null` or throws if credentials are invalid (GoTrue behavior depends on client version).
+
+<Note>
+  After a successful login, the application extracts the following values from the session and stores them in the ASP.NET Core session (`HttpContext.Session`):
+
+  | Session key     | Source                              |
+  |-----------------|-------------------------------------|
+  | `UserId`        | `session.User.Id`                   |
+  | `FullName`      | `session.User.UserMetadata["full_name"]` |
+  | `Email`         | `session.User.Email`                |
+  | `Role`          | Looked up from the `users` table    |
+  | `PhotoUrl`      | Looked up from the `users` table    |
+  | `AccessToken`   | `session.AccessToken`               |
+  | `RefreshToken`  | `session.RefreshToken`              |
+</Note>
+
+---
+
+### CambiarPasswordAsync
+
+Changes the authenticated user's password. To prevent unauthorized changes, the method first re-authenticates with the **current** password via `SignIn`. Only if that succeeds does it call `Auth.Update` to apply the new password. Any exception at either step (wrong current password, network error, invalid token) causes the method to return `false` rather than propagate.
+
+```csharp
+Task<bool> CambiarPasswordAsync(string email, string currentPassword, string newPassword)
+```
+
+<ResponseField name="email" type="string" required>
+  The account email address, used to re-authenticate before the change.
+</ResponseField>
+
+<ResponseField name="currentPassword" type="string" required>
+  The user's existing password. If this is incorrect, GoTrue will throw and the method returns `false`.
+</ResponseField>
+
+<ResponseField name="newPassword" type="string" required>
+  The desired new password. Applied via `Auth.Update(new UserAttributes { Password = newPassword })`.
+</ResponseField>
+
+**Returns** `Task<bool>` — `true` if the password was changed successfully; `false` if the current password was wrong or any other exception occurred.
+
+<Warning>
+  `CambiarPasswordAsync` swallows all exceptions and returns `false`. If you need to surface the reason for failure to the user (e.g., distinguish between "wrong password" and "network error"), you should extend this method to catch and inspect specific exception types rather than using a bare `catch`.
+</Warning>
+
+---
+
+### LogoutAsync
+
+Signs out the current GoTrue session by calling `Auth.SignOut()`. After this call, the Supabase client's internal session is cleared.
+
+```csharp
+Task LogoutAsync()
+```
+
+**Returns** `Task` (void async). Always call this in conjunction with clearing the ASP.NET Core `HttpContext.Session` to ensure both the Supabase token and the server-side session are invalidated.
+
+<Tip>
+  In the `AccountController`, pair `LogoutAsync()` with `HttpContext.Session.Clear()` so that both the GoTrue token and the in-memory session keys (`UserId`, `AccessToken`, etc.) are removed at the same time.
+</Tip>

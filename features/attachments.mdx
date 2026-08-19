@@ -1,0 +1,140 @@
+---
+title: "Ticket File Attachments with Supabase Storage"
+sidebarTitle: "Attachments"
+description: "HelpDesk Pro 2026 supports multi-file attachments per ticket stored in Supabase Storage. Learn how uploading, viewing, and deletion work end to end."
+---
+
+HelpDesk Pro 2026 lets users attach one or more files to a ticket at creation time or while editing, storing them in a dedicated Supabase Storage bucket. Each uploaded file is tracked by a `TicketAttachment` database record that holds the original filename, the UUID-based storage path, and a public URL for direct access. Files can be removed individually through an AJAX delete endpoint that cleans up both the storage object and the database record in a single operation.
+
+## Uploading Attachments
+
+Files are uploaded through the `UploadAttachmentsAsync()` private method in `TicketService`, which is called automatically whenever `CreateTicketAsync()` or `UpdateTicketAsync()` receives a non-empty `Attachments` / `NewAttachments` list.
+
+<Steps>
+  <Step title="Read the file into memory">
+    Each `IFormFile` is copied into a `MemoryStream` and converted to a byte array for upload.
+  </Step>
+  <Step title="Generate a UUID filename">
+    The original file extension is preserved, but the name is replaced with a new `Guid` to prevent collisions and avoid exposing original filenames in the bucket:
+
+    ```csharp
+    var extension = Path.GetExtension(file.FileName);
+    var fileNameInBucket = $"{Guid.NewGuid()}{extension}";
+    ```
+  </Step>
+  <Step title="Upload to Supabase Storage">
+    The byte array is uploaded to the `ticket-files` bucket using the UUID filename:
+
+    ```csharp
+    await _supabase.Storage
+        .From("ticket-files")
+        .Upload(fileBytes, fileNameInBucket);
+    ```
+  </Step>
+  <Step title="Retrieve the public URL">
+    After upload, the public URL is retrieved from the same bucket reference:
+
+    ```csharp
+    var publicUrl = _supabase.Storage
+        .From("ticket-files")
+        .GetPublicUrl(fileNameInBucket);
+    ```
+  </Step>
+  <Step title="Insert a TicketAttachment record">
+    A new `TicketAttachment` row is inserted into Supabase with the original filename, the UUID storage path, the public URL, and the parent ticket ID:
+
+    ```csharp
+    var attachmentRecord = new TicketAttachment
+    {
+        TicketId    = ticketId,
+        FileName    = file.FileName,       // original name shown in the UI
+        FilePath    = fileNameInBucket,    // UUID name used in the bucket
+        FileUrl     = publicUrl,           // direct public URL
+        CreatedAt   = DateTime.UtcNow
+    };
+
+    await _supabase.From<TicketAttachment>().Insert(attachmentRecord);
+    ```
+  </Step>
+</Steps>
+
+### Supported File Types
+
+There is no server-side file type restriction. The upload pipeline preserves whatever extension the original file carries. Common usage includes screenshots (`.png`, `.jpg`), documents (`.pdf`, `.docx`), and log exports (`.txt`, `.csv`, `.log`).
+
+### Multiple Files per Ticket
+
+Both the **Create** and **Edit** forms expose a `multiple` file input, mapped to `List<IFormFile>?` on the view model. Every file in the list is uploaded and recorded independently — a single ticket can accumulate attachments across multiple edit sessions.
+
+```html
+<!-- Both Create and Edit forms render this input -->
+<input type="file" name="Attachments" multiple />
+```
+
+## Deleting an Attachment
+
+Attachments are deleted via `POST /Tickets/DeleteAttachment?attachmentId={id}`. The endpoint is called asynchronously from JavaScript on the edit page — no full page reload occurs.
+
+The `DeleteAttachmentAsync()` service method performs both cleanup steps in sequence:
+
+```csharp
+public async Task<bool> DeleteAttachmentAsync(long attachmentId)
+{
+    // 1. Fetch the attachment record
+    var attachment = response.Models.FirstOrDefault();
+    if (attachment == null) return false;
+
+    // 2. Remove the file from the ticket-files bucket
+    await _supabase.Storage
+        .From("ticket-files")
+        .Remove(new List<string> { attachment.FilePath });
+
+    // 3. Delete the database record
+    await _supabase.From<TicketAttachment>()
+        .Where(a => a.AttachmentId == attachmentId)
+        .Delete();
+
+    return true;
+}
+```
+
+The controller returns a JSON response that the client uses to remove the attachment row from the DOM without refreshing:
+
+```json
+// Success
+{ "success": true, "message": "Archivo eliminado del almacenamiento y registro." }
+
+// Failure (record not found)
+{ "success": false, "message": "No se pudo eliminar el archivo." }
+```
+
+<Warning>
+  Deletion is immediate and permanent. The file is removed from Supabase Storage at the same time as the database record. There is no soft-delete or recycle bin — always confirm before proceeding.
+</Warning>
+
+## Viewing Attachments
+
+Because `FileUrl` holds a public Supabase Storage URL, attachments can be opened directly from any view that renders them — no signed URLs or server proxies are required. The ticket list (`Index`) shows all attachments per ticket as clickable links, and the edit view lists them with individual delete buttons (for users with edit permission).
+
+```html
+<a href="@file.FileUrl" target="_blank" rel="noopener noreferrer">
+    @file.FileName
+</a>
+```
+
+## TicketAttachment Model Reference
+
+The `ticket_attachments` table schema, as defined in `TicketAttachment.cs`:
+
+| Property | Column | Type | Description |
+|---|---|---|---|
+| `AttachmentId` | `attachment_id` | `long` | Primary key, auto-generated |
+| `TicketId` | `ticket_id` | `long` | FK → `tickets.ticket_id` |
+| `FileName` | `file_name` | `string` | Original filename shown in the UI |
+| `FilePath` | `file_path` | `string` | UUID-based filename stored in the bucket |
+| `FileUrl` | `file_url` | `string` | Full public URL for direct file access |
+| `CreatedAt` | `created_at` | `DateTime` | UTC timestamp of the upload |
+
+<Note>
+  The `ticket-files` Supabase Storage bucket must be configured as **public** (or have an appropriate RLS policy granting read access) for `GetPublicUrl()` to return accessible URLs. If the bucket is private, the returned URLs will result in 400/403 errors when opened in a browser. Verify bucket visibility in the Supabase dashboard under **Storage → ticket-files → Settings**.
+</Note>

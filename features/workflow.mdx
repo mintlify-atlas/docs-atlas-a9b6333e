@@ -1,0 +1,122 @@
+---
+title: "Ticket State Workflow and Transition Rules"
+sidebarTitle: "Workflow"
+description: "HelpDesk Pro 2026 enforces a five-state ticket lifecycle. Learn the valid state transitions and which roles can advance them through the system."
+---
+
+HelpDesk Pro 2026 moves every support ticket through a structured five-state lifecycle that mirrors the real-world resolution process — from initial submission, through active work and review, to a terminal outcome of either resolved or cancelled. Transitions are not free-form: each state only allows progression to a specific set of next states, and only privileged roles can trigger those changes. This prevents tickets from being accidentally closed, skipped, or reopened once finalized.
+
+## Ticket States
+
+| ID | State Name | Meaning |
+|---|---|---|
+| 1 | **PENDIENTE** | Ticket submitted, awaiting technician action |
+| 2 | **EN PROCESO** | Technician has begun working on the issue |
+| 3 | **EN REVISIÓN** | Work is done; under review before closing |
+| 4 | **RESUELTO** | Issue confirmed resolved — terminal state |
+| 5 | **CANCELADO** | Ticket withdrawn or rejected — terminal state |
+
+## Valid State Transitions
+
+Transitions are enforced by the `IsValidStateTransition()` method in `TicketService`. The switch expression maps each current state to its only permitted next states:
+
+```csharp
+private static bool IsValidStateTransition(int currentState, int newState)
+{
+    return currentState switch
+    {
+        1 => newState == 2 || newState == 5,
+        2 => newState == 3 || newState == 5,
+        3 => newState == 4 || newState == 5,
+        4 => false,
+        5 => false,
+        _ => false
+    };
+}
+```
+
+The full transition map is:
+
+<CardGroup cols={2}>
+  <Card title="1 → PENDIENTE" icon="hourglass">
+    Can advance to **EN PROCESO (2)** when a technician picks it up, or be **CANCELADO (5)** immediately if the request is invalid.
+  </Card>
+  <Card title="2 → EN PROCESO" icon="wrench">
+    Can advance to **EN REVISIÓN (3)** when work is complete and ready for review, or be **CANCELADO (5)** if abandoned.
+  </Card>
+  <Card title="3 → EN REVISIÓN" icon="magnifying-glass">
+    Can advance to **RESUELTO (4)** once the resolution is confirmed, or be **CANCELADO (5)** if the review fails.
+  </Card>
+  <Card title="4 & 5 → Terminal" icon="lock">
+    **RESUELTO** and **CANCELADO** are terminal states. No further transitions are allowed from either state.
+  </Card>
+</CardGroup>
+
+### Transition Summary Table
+
+| From State | To State | Allowed? |
+|---|---|---|
+| 1 PENDIENTE | 2 EN PROCESO | ✅ |
+| 1 PENDIENTE | 5 CANCELADO | ✅ |
+| 1 PENDIENTE | 3, 4 | ❌ |
+| 2 EN PROCESO | 3 EN REVISIÓN | ✅ |
+| 2 EN PROCESO | 5 CANCELADO | ✅ |
+| 2 EN PROCESO | 1, 4 | ❌ |
+| 3 EN REVISIÓN | 4 RESUELTO | ✅ |
+| 3 EN REVISIÓN | 5 CANCELADO | ✅ |
+| 3 EN REVISIÓN | 1, 2 | ❌ |
+| 4 RESUELTO | any | ❌ |
+| 5 CANCELADO | any | ❌ |
+
+## Role Restrictions
+
+State changes are controlled by `UpdateTicketStateAsync()` in `TicketService`. The very first check in that method blocks unauthorized callers before any transition logic runs:
+
+```csharp
+public async Task<bool> UpdateTicketStateAsync(
+    long ticketId, int newStateId, Guid userId, string userRole)
+{
+    var normalizedRole = userRole?.Trim().ToUpperInvariant() ?? "EMPLEADO";
+
+    if (normalizedRole != "SOPORTE" && normalizedRole != "SUPERUSUARIO")
+        return false;
+
+    // ... transition validation continues
+}
+```
+
+<Tabs>
+  <Tab title="EMPLEADO">
+    **Cannot change ticket states.** Employees have no access to the state control panel on the edit page. Calling `POST /Tickets/UpdateState` as an EMPLEADO will always return `false` and display an error.
+  </Tab>
+  <Tab title="SOPORTE">
+    **Full transition authority.** Support technicians see a dedicated state control panel on every ticket's edit page. The panel surfaces only the valid next-state buttons for the ticket's current state — invalid transitions are never shown.
+  </Tab>
+  <Tab title="SUPERUSUARIO">
+    **Full transition authority.** Administrators have the same state control panel as SOPORTE and can override transitions on any ticket in the system.
+  </Tab>
+</Tabs>
+
+## Edit Permissions and State
+
+State also governs whether an EMPLEADO can edit a ticket's fields. The `UpdateTicketAsync()` method enforces this constraint:
+
+```csharp
+if (existingTicket.StateId != 1 && normalizedRole == "EMPLEADO")
+    return false;
+```
+
+This means:
+
+- **StateId == 1 (PENDIENTE)** — EMPLEADO can still update the subject, description, justification, system, category, priority, risk, and attachments.
+- **StateId 2, 3, 4, or 5** — All form fields are locked for EMPLEADO users. The edit view renders them as read-only and displays a notice that the ticket is under active handling.
+
+SOPORTE users always see read-only form fields regardless of state — their interaction channel is the state control panel, not the field editor.
+
+<Note>
+  State transitions are validated and applied server-side inside `UpdateTicketStateAsync`. The view-layer control panel only shows valid buttons as a convenience — the server independently verifies every transition attempt against `IsValidStateTransition()` before writing to Supabase.
+</Note>
+
+<Warning>
+  Once a ticket reaches **RESUELTO (4)** or **CANCELADO (5)**, it cannot be reopened or moved to any other state. There is no undo. If a ticket was incorrectly closed, a new ticket must be created.
+</Warning>

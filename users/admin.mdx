@@ -1,0 +1,149 @@
+---
+title: "Admin Panel: View and Change User Roles"
+sidebarTitle: "Admin Panel"
+description: "SUPERUSUARIO accounts can view all registered users and assign the EMPLEADO or SOPORTE role from the admin panel at /Users/Index."
+---
+
+The user administration panel gives SUPERUSUARIO accounts a central place to view every registered user and change their system role. Access is strictly limited to SUPERUSUARIO — any user with a different role who navigates to the panel is silently redirected to the dashboard. There is no user deletion feature; the admin panel is role management only.
+
+## Accessing the Panel
+
+The admin panel is available at two equivalent routes:
+
+| Route | Controller | Action |
+|---|---|---|
+| `GET /Users/Index` | `UsersController` | `Index` |
+| `GET /AdminUsers` | `AdminUsersController` | `Index` |
+
+Both routes perform the same session and role checks before rendering the user list. If `UserId` is not present in the session, the request is redirected to `/Account/Login`. If the session role is anything other than `SUPERUSUARIO`, the request is redirected to `Home/Dashboard`.
+
+```csharp
+// UsersController.cs — access guard
+var role = HttpContext.Session.GetString("Role");
+
+if (!string.Equals(role, "SUPERUSUARIO", StringComparison.OrdinalIgnoreCase))
+{
+    return RedirectToAction("Dashboard", "Home");
+}
+```
+
+## Listing All Users
+
+Once access is confirmed, the controller calls `UserAdministrationService.ObtenerTodosAsync()`, which fetches every row from the `users` table via the Supabase Postgrest client and returns them as a `List<Usuario>`:
+
+```csharp
+// Services/UserAdministrationService.cs
+public async Task<List<Usuario>> ObtenerTodosAsync()
+{
+    var response = await _client
+        .From<Usuario>()
+        .Get();
+
+    return response.Models.ToList();
+}
+```
+
+The results are wrapped in `AdministrarUsuariosViewModel` and passed to the view, where they are rendered as a table showing each user's UID, full name, email address, and current role.
+
+<Info>
+  SUPERUSUARIO rows are rendered with a read-only label in the Actions column — the edit button is hidden for any user whose role is `SUPERUSUARIO`, preventing accidental role changes to privileged accounts.
+</Info>
+
+## Changing a User's Role
+
+Clicking the **Editar** button for any non-SUPERUSUARIO row opens a slide-in panel. Selecting a new role and confirming submits a `POST` to `/Users/CambiarRol` (or `/AdminUsers/UpdateRole` via `AdminUsersController`).
+
+<Steps>
+  <Step title="Select target user">
+    Click **Editar** on any user row that is not a SUPERUSUARIO. The panel pre-fills with the user's UID, name, email, and current role.
+  </Step>
+  <Step title="Choose a new role">
+    Select either `EMPLEADO` or `SOPORTE` from the dropdown. These are the only two assignable roles — SUPERUSUARIO cannot be granted through the UI.
+  </Step>
+  <Step title="Submit the change">
+    Click **Guardar cambios**. The form posts `userId` (Guid) and `role` (string) to the controller.
+
+    ```csharp
+    // Models/CambiarRolViewModel.cs
+    public class CambiarRolViewModel
+    {
+        [Required]
+        public Guid UserId { get; set; }
+
+        [Required]
+        public string Role { get; set; } = string.Empty;
+    }
+    ```
+  </Step>
+  <Step title="Role is validated and applied">
+    The controller validates that `role` is either `"EMPLEADO"` or `"SOPORTE"`, then calls `UserAdministrationService.CambiarRolAsync()`.
+
+    ```csharp
+    // UsersController.cs — role validation
+    if (role != "EMPLEADO" && role != "SOPORTE")
+    {
+        TempData["Error"] = "El rol seleccionado no es válido.";
+        return RedirectToAction("Index");
+    }
+
+    await _userAdministrationService.CambiarRolAsync(userId, role);
+    ```
+  </Step>
+  <Step title="Success confirmation">
+    On success, `TempData["Success"]` is set and the page redirects back to `GET /Users/Index` where a green confirmation banner is shown.
+  </Step>
+</Steps>
+
+## How CambiarRolAsync Works Internally
+
+`UserAdministrationService.CambiarRolAsync()` does not update the `users` table directly. Instead, it calls a PostgreSQL function in your Supabase project via RPC:
+
+```csharp
+// Services/UserAdministrationService.cs
+public async Task CambiarRolAsync(Guid userId, string nuevoRol)
+{
+    if (nuevoRol != "EMPLEADO" && nuevoRol != "SOPORTE")
+        throw new ArgumentException("El rol seleccionado no es válido.");
+
+    var parameters = new Dictionary<string, object>
+    {
+        { "target_user_id", userId },
+        { "new_role", nuevoRol }
+    };
+
+    await _client.Rpc("admin_change_user_role", parameters);
+}
+```
+
+The RPC call invokes the `admin_change_user_role` function with the target user's UUID and the new role string.
+
+<Note>
+  The `admin_change_user_role` PostgreSQL function must be created manually in your Supabase project's SQL editor. It should accept `target_user_id uuid` and `new_role text` parameters, update the `role` column in the `users` table for that user, and be granted `EXECUTE` permission to the appropriate database role (typically `authenticated` or a service role). Without this function in place, all role-change requests will fail with a Supabase RPC error.
+</Note>
+
+## Safety Guards
+
+Multiple layers of protection prevent misuse of the role-change endpoint:
+
+<CardGroup cols={2}>
+  <Card title="SUPERUSUARIO self-protection" icon="lock">
+    The controller compares the `userId` in the POST body against the `UserId` in the current session. If they match, the operation is rejected — a SUPERUSUARIO cannot demote their own account.
+  </Card>
+  <Card title="Role allowlist enforcement" icon="shield">
+    Both the controller and `UserAdministrationService` validate that the requested role is exactly `"EMPLEADO"` or `"SOPORTE"`. Any other string is rejected before reaching the database.
+  </Card>
+  <Card title="Session authentication" icon="key">
+    Every request to `/Users/CambiarRol` (and `/AdminUsers/UpdateRole`) checks that a valid session exists. No session means an immediate redirect to the login page.
+  </Card>
+  <Card title="SUPERUSUARIO-only access" icon="user-shield">
+    Non-SUPERUSUARIO sessions are redirected to the dashboard before any user data is loaded. The role check happens first — before any DB query is made.
+  </Card>
+</CardGroup>
+
+<Warning>
+  HelpDesk Pro 2026 does not include a user deletion feature. Users can only have their role changed between `EMPLEADO` and `SOPORTE`. To fully remove a user, you must delete the account directly from your Supabase Authentication dashboard and remove the corresponding row from the `users` table.
+</Warning>
+
+## Role Change Behavior for Active Sessions
+
+Role changes take effect on the target user's **next login**. An active session retains its original role value in the `Role` session key — the application does not push live role updates to existing sessions. Affected users should be informed to sign out and sign back in to receive their new permissions.

@@ -1,0 +1,387 @@
+---
+title: "ITicketService and TicketService: Full Method Reference"
+sidebarTitle: "TicketService"
+description: "Complete method reference for ITicketService and its implementation TicketService, covering catalogs, ticket CRUD, state transitions, attachments, and comments."
+---
+
+`ITicketService` is the primary interface for all ticket-related operations in HelpDesk Pro 2026. `TicketService` provides the concrete implementation, communicating with Supabase Postgrest via the Supabase .NET SDK. Every controller that deals with tickets — listing, creating, updating, state changes, attachments, and comments — depends on this interface, which is registered as a scoped service in `Program.cs`.
+
+## Interface Definition
+
+The full `ITicketService` contract defines six catalog queries, six ticket operations, and four comment operations:
+
+```csharp
+public interface ITicketService
+{
+    Task<List<SystemCatalog>> GetSystemsAsync();
+    Task<List<Category>> GetCategoriesAsync();
+    Task<List<Priority>> GetPrioritiesAsync();
+    Task<List<RiskLevel>> GetRiskLevelsAsync();
+    Task<List<TicketState>> GetTicketStatesAsync();
+    Task<List<Usuario>> GetUsersAsync();
+
+    Task<List<Ticket>> GetTicketsAsync(
+        Guid userId,
+        string userRole,
+        Guid? searchUserId = null,
+        DateTime? startDate = null,
+        DateTime? endDate = null,
+        int? stateId = null,
+        int? systemId = null);
+
+    Task<Ticket?> GetTicketByIdAsync(long ticketId);
+    Task<Ticket> CreateTicketAsync(CreateTicketViewModel model, Guid requesterId);
+    Task<bool> UpdateTicketAsync(EditTicketViewModel model, Guid userId, string userRole);
+    Task<bool> UpdateTicketStateAsync(long ticketId, int newStateId, Guid userId, string userRole);
+    Task<bool> DeleteAttachmentAsync(long attachmentId);
+
+    Task<List<Comment>> GetCommentsByTicketIdAsync(long ticketId);
+    Task<Comment?> AddCommentAsync(long ticketId, Guid userId, string commentText);
+    Task<bool> UpdateCommentAsync(long commentId, Guid userId, string commentText);
+    Task<bool> DeleteCommentAsync(long commentId, Guid userId);
+}
+```
+
+---
+
+## Catalog Methods
+
+These methods populate dropdown menus and filter options across the UI. Each fetches from a reference table in Supabase and returns results as a typed list.
+
+<Accordion title="GetSystemsAsync()">
+
+Returns all `SystemCatalog` records, ordered alphabetically by `Name`. Used to populate the **System** dropdown when creating or editing a ticket.
+
+```csharp
+Task<List<SystemCatalog>> GetSystemsAsync()
+```
+
+**Returns** `Task<List<SystemCatalog>>` — all systems, sorted A→Z by name.
+
+</Accordion>
+
+<Accordion title="GetCategoriesAsync()">
+
+Returns all `Category` records, ordered alphabetically by `Name`. Used to populate the **Category** dropdown on ticket forms.
+
+```csharp
+Task<List<Category>> GetCategoriesAsync()
+```
+
+**Returns** `Task<List<Category>>` — all categories, sorted A→Z by name.
+
+</Accordion>
+
+<Accordion title="GetPrioritiesAsync()">
+
+Returns all `Priority` records in their natural database order (no explicit sort applied).
+
+```csharp
+Task<List<Priority>> GetPrioritiesAsync()
+```
+
+**Returns** `Task<List<Priority>>` — all priority levels.
+
+</Accordion>
+
+<Accordion title="GetRiskLevelsAsync()">
+
+Returns all `RiskLevel` records in their natural database order.
+
+```csharp
+Task<List<RiskLevel>> GetRiskLevelsAsync()
+```
+
+**Returns** `Task<List<RiskLevel>>` — all risk levels.
+
+</Accordion>
+
+<Accordion title="GetTicketStatesAsync()">
+
+Returns all `TicketState` records. States are integer-identified: 1=PENDIENTE, 2=EN PROCESO, 3=EN REVISIÓN, 4=RESUELTO, 5=CANCELADO.
+
+```csharp
+Task<List<TicketState>> GetTicketStatesAsync()
+```
+
+**Returns** `Task<List<TicketState>>` — all ticket states.
+
+</Accordion>
+
+<Accordion title="GetUsersAsync()">
+
+Returns all `Usuario` records, ordered alphabetically by `FullName`. Used to populate user-selection dropdowns in admin and support views.
+
+```csharp
+Task<List<Usuario>> GetUsersAsync()
+```
+
+**Returns** `Task<List<Usuario>>` — all users, sorted A→Z by full name.
+
+</Accordion>
+
+---
+
+## Ticket Methods
+
+### GetTicketsAsync
+
+Retrieves a role-scoped, filterable list of tickets. The `userRole` parameter drives the access logic: EMPLEADO users only see tickets where they are the requester, while SOPORTE and SUPERUSUARIO users see every ticket in the system. All five optional filters are applied after the initial role-scoped fetch.
+
+```csharp
+Task<List<Ticket>> GetTicketsAsync(
+    Guid userId,
+    string userRole,
+    Guid? searchUserId = null,
+    DateTime? startDate = null,
+    DateTime? endDate = null,
+    int? stateId = null,
+    int? systemId = null)
+```
+
+<ResponseField name="userId" type="Guid" required>
+  The ID of the currently authenticated user. Used to scope results when `userRole` is `"EMPLEADO"`.
+</ResponseField>
+
+<ResponseField name="userRole" type="string" required>
+  The caller's role (`"EMPLEADO"`, `"SOPORTE"`, or `"SUPERUSUARIO"`). Role is normalized to uppercase and trimmed before comparison.
+</ResponseField>
+
+<ResponseField name="searchUserId" type="Guid?">
+  When provided, narrows results to tickets where `RequesterId` or `AssignedTo` matches this value.
+</ResponseField>
+
+<ResponseField name="startDate" type="DateTime?">
+  Inclusive lower bound on `CreatedAt` date (date portion only, time ignored).
+</ResponseField>
+
+<ResponseField name="endDate" type="DateTime?">
+  Inclusive upper bound on `CreatedAt` date (date portion only, time ignored).
+</ResponseField>
+
+<ResponseField name="stateId" type="int?">
+  When `> 0`, filters to tickets in that state. Maps to the state ID (1–5).
+</ResponseField>
+
+<ResponseField name="systemId" type="int?">
+  When `> 0`, filters to tickets belonging to that system.
+</ResponseField>
+
+**Returns** `Task<List<Ticket>>` — matching tickets ordered by `CreatedAt` descending. Each `Ticket` has its `Attachments`, `Requester`, `AssignedTech`, and `System` navigation properties populated.
+
+---
+
+### GetTicketByIdAsync
+
+Fetches a single ticket by its primary key and populates all navigation properties: `Attachments`, `Requester`, `AssignedTech`, and `System`.
+
+```csharp
+Task<Ticket?> GetTicketByIdAsync(long ticketId)
+```
+
+<ResponseField name="ticketId" type="long" required>
+  The primary key of the ticket to retrieve.
+</ResponseField>
+
+**Returns** `Task<Ticket?>` — the fully-hydrated ticket, or `null` if no ticket exists with that ID.
+
+---
+
+### CreateTicketAsync
+
+Creates a new ticket from a `CreateTicketViewModel`. The method handles three automatic steps before inserting: it generates a sequential `TCK-XXXX` code, selects the least-busy SOPORTE user via auto-assignment, and uploads any file attachments to the `ticket-files` bucket.
+
+```csharp
+Task<Ticket> CreateTicketAsync(CreateTicketViewModel model, Guid requesterId)
+```
+
+<ResponseField name="model" type="CreateTicketViewModel" required>
+  View model containing `SystemId`, `CategoryId`, `PriorityId`, `RiskId`, `Subject`, `Description`, `Justification`, and an optional `List<IFormFile> Attachments`.
+</ResponseField>
+
+<ResponseField name="requesterId" type="Guid" required>
+  The `UserId` of the authenticated user submitting the ticket.
+</ResponseField>
+
+**Returns** `Task<Ticket>` — the newly created ticket record as returned by Supabase after insert.
+
+<Note>
+  **Auto-assignment logic:** the service queries all SOPORTE users, counts their active tickets (StateId ≠ 4 and ≠ 5), and assigns the ticket to the user with the lowest count. If no SOPORTE users exist, it falls back to the first SUPERUSUARIO in the database.
+</Note>
+
+---
+
+### UpdateTicketAsync
+
+Updates the editable fields of an existing ticket. Enforces a role-based edit lock: an EMPLEADO caller can only update a ticket while it is still in state 1 (PENDIENTE). If the ticket has advanced beyond PENDIENTE, EMPLEADO calls are rejected with `false`.
+
+```csharp
+Task<bool> UpdateTicketAsync(EditTicketViewModel model, Guid userId, string userRole)
+```
+
+<ResponseField name="model" type="EditTicketViewModel" required>
+  View model with `TicketId` and updated values for `SystemId`, `CategoryId`, `PriorityId`, `RiskId`, `Subject`, `Description`, `Justification`, and an optional `List<IFormFile> NewAttachments`.
+</ResponseField>
+
+<ResponseField name="userId" type="Guid" required>
+  The ID of the user performing the update.
+</ResponseField>
+
+<ResponseField name="userRole" type="string" required>
+  Role of the caller. EMPLEADO edits are blocked when `StateId != 1`.
+</ResponseField>
+
+**Returns** `Task<bool>` — `true` on success; `false` if the ticket is not found or the EMPLEADO lock is active.
+
+---
+
+### UpdateTicketStateAsync
+
+Advances or cancels a ticket by transitioning it to a new state. Only SOPORTE and SUPERUSUARIO callers are allowed; EMPLEADO callers always receive `false`. The transition is additionally validated against the allowed state graph via `IsValidStateTransition`.
+
+```csharp
+Task<bool> UpdateTicketStateAsync(long ticketId, int newStateId, Guid userId, string userRole)
+```
+
+<ResponseField name="ticketId" type="long" required>
+  The primary key of the ticket whose state should change.
+</ResponseField>
+
+<ResponseField name="newStateId" type="int" required>
+  The target state ID. Must be a valid transition from the current state.
+</ResponseField>
+
+<ResponseField name="userId" type="Guid" required>
+  The ID of the user requesting the state change (currently recorded but not used for ownership checks).
+</ResponseField>
+
+<ResponseField name="userRole" type="string" required>
+  Must be `"SOPORTE"` or `"SUPERUSUARIO"`. Any other value returns `false` immediately.
+</ResponseField>
+
+**Returns** `Task<bool>` — `true` if the state was updated; `false` if the role is insufficient, the ticket is not found, or the transition is invalid.
+
+#### State Transition Rules
+
+The private `IsValidStateTransition` helper encodes every legal transition as a switch expression:
+
+```csharp
+private static bool IsValidStateTransition(int currentState, int newState)
+{
+    return currentState switch
+    {
+        1 => newState == 2 || newState == 5,  // PENDIENTE → EN PROCESO | CANCELADO
+        2 => newState == 3 || newState == 5,  // EN PROCESO → EN REVISIÓN | CANCELADO
+        3 => newState == 4 || newState == 5,  // EN REVISIÓN → RESUELTO | CANCELADO
+        4 => false,                           // RESUELTO (terminal)
+        5 => false,                           // CANCELADO (terminal)
+        _ => false
+    };
+}
+```
+
+<Warning>
+  States 4 (RESUELTO) and 5 (CANCELADO) are terminal. Once a ticket reaches either state, no further state changes are permitted — `UpdateTicketStateAsync` will return `false`.
+</Warning>
+
+---
+
+### DeleteAttachmentAsync
+
+Removes a ticket attachment by deleting the file from the `ticket-files` Supabase Storage bucket and then deleting the corresponding `TicketAttachment` database record.
+
+```csharp
+Task<bool> DeleteAttachmentAsync(long attachmentId)
+```
+
+<ResponseField name="attachmentId" type="long" required>
+  The primary key of the `TicketAttachment` record to remove.
+</ResponseField>
+
+**Returns** `Task<bool>` — `true` if deleted successfully; `false` if no attachment with that ID was found.
+
+---
+
+## Comment Methods
+
+### GetCommentsByTicketIdAsync
+
+Returns all comments for a given ticket, ordered chronologically (oldest first). Each comment has its `User` navigation property populated.
+
+```csharp
+Task<List<Comment>> GetCommentsByTicketIdAsync(long ticketId)
+```
+
+<ResponseField name="ticketId" type="long" required>
+  The ticket whose comments should be retrieved.
+</ResponseField>
+
+**Returns** `Task<List<Comment>>` — comments ordered by `CreatedAt` ascending.
+
+---
+
+### AddCommentAsync
+
+Inserts a new comment on a ticket and returns the inserted record with `User` populated. Empty or whitespace-only comment text is rejected and returns `null`.
+
+```csharp
+Task<Comment?> AddCommentAsync(long ticketId, Guid userId, string commentText)
+```
+
+<ResponseField name="ticketId" type="long" required>
+  The ticket to comment on.
+</ResponseField>
+
+<ResponseField name="userId" type="Guid" required>
+  The ID of the user authoring the comment.
+</ResponseField>
+
+<ResponseField name="commentText" type="string" required>
+  The comment body. Leading/trailing whitespace is trimmed before insert. Returns `null` if blank.
+</ResponseField>
+
+**Returns** `Task<Comment?>` — the inserted comment with `User` populated, or `null` if `commentText` is blank.
+
+---
+
+### UpdateCommentAsync
+
+Updates the text of an existing comment. Only the comment's original author (`UserId` match) may update it.
+
+```csharp
+Task<bool> UpdateCommentAsync(long commentId, Guid userId, string commentText)
+```
+
+<ResponseField name="commentId" type="long" required>
+  The primary key of the comment to update.
+</ResponseField>
+
+<ResponseField name="userId" type="Guid" required>
+  Must match the comment's `UserId`; otherwise the update is rejected.
+</ResponseField>
+
+<ResponseField name="commentText" type="string" required>
+  The new comment body. Whitespace is trimmed. Returns `false` if blank.
+</ResponseField>
+
+**Returns** `Task<bool>` — `true` if updated; `false` if not found, blank text, or ownership mismatch.
+
+---
+
+### DeleteCommentAsync
+
+Deletes a comment. Only the comment's original author may delete it.
+
+```csharp
+Task<bool> DeleteCommentAsync(long commentId, Guid userId)
+```
+
+<ResponseField name="commentId" type="long" required>
+  The primary key of the comment to delete.
+</ResponseField>
+
+<ResponseField name="userId" type="Guid" required>
+  Must match the comment's `UserId`; otherwise the delete is rejected.
+</ResponseField>
+
+**Returns** `Task<bool>` — `true` if deleted; `false` if not found or ownership mismatch.

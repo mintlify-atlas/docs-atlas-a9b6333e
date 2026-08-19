@@ -1,0 +1,267 @@
+---
+title: "Database Schema and EF Core Connection Setup"
+sidebarTitle: "Database"
+description: "HelpDesk Pro 2026 connects to PostgreSQL via both the Supabase SDK (PostgREST) and EF Core (Npgsql) for analytics. Learn the schema and setup."
+---
+
+HelpDesk Pro 2026 uses a dual-access pattern for its PostgreSQL database. The **Supabase PostgREST SDK** handles all standard application operations — creating tickets, fetching users, adding comments — through the typed C# client and the `BaseModel`-derived models. **EF Core with the Npgsql provider** is used exclusively for the analytics dashboard, where multi-join aggregate queries are more naturally expressed in LINQ than assembled through the PostgREST fluent API. Both paths connect to the same Supabase PostgreSQL instance.
+
+## NuGet Packages
+
+Both database access libraries are declared in the project file:
+
+```xml HelpDesk_Pro_2026.csproj
+<ItemGroup>
+  <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+  <PackageReference Include="Supabase" Version="1.1.1" />
+</ItemGroup>
+```
+
+The `Supabase` package bundles the PostgREST client, the Auth client, and the Storage client. `Npgsql.EntityFrameworkCore.PostgreSQL` is the official EF Core provider for PostgreSQL and is used only by `AppDbContext`.
+
+## EF Core Setup
+
+`AppDbContext` is a lightweight context registered only for the tables that the analytics dashboard queries. It intentionally avoids re-mapping all application tables — the full domain models are managed by the Supabase SDK.
+
+### Entity Definitions
+
+Two EF Core entities are defined, each mapped to an existing Supabase table:
+
+```csharp Data/AppDbContext.cs
+// Lightweight EF Core Entities (isolated from Supabase BaseModel)
+public class EfTicket
+{
+    public long TicketId { get; set; }
+    public int PriorityId { get; set; }
+    public string Subject { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+    public EfPriority? Priority { get; set; }
+}
+
+public class EfPriority
+{
+    public int PriorityId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Color { get; set; } = string.Empty;
+}
+```
+
+These are purposely separate from the Supabase `BaseModel`-derived `Ticket` and `Priority` models to avoid attribute conflicts between the two libraries.
+
+### DbContext and Table Mapping
+
+`AppDbContext` maps the EF entities to the existing `tickets` and `priorities` tables using `snake_case` column names to match the PostgreSQL schema:
+
+```csharp Data/AppDbContext.cs
+public class AppDbContext : DbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+
+    public DbSet<EfTicket> Tickets { get; set; }
+    public DbSet<EfPriority> Priorities { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+
+        modelBuilder.Entity<EfTicket>(entity =>
+        {
+            entity.ToTable("tickets");
+            entity.HasKey(t => t.TicketId);
+            entity.Property(t => t.TicketId).HasColumnName("ticket_id");
+            entity.Property(t => t.PriorityId).HasColumnName("priority_id");
+            entity.Property(t => t.Subject).HasColumnName("subject");
+            entity.Property(t => t.CreatedAt).HasColumnName("created_at");
+
+            entity.HasOne(t => t.Priority)
+                  .WithMany()
+                  .HasForeignKey(t => t.PriorityId);
+        });
+
+        modelBuilder.Entity<EfPriority>(entity =>
+        {
+            entity.ToTable("priorities");
+            entity.HasKey(p => p.PriorityId);
+            entity.Property(p => p.PriorityId).HasColumnName("priority_id");
+            entity.Property(p => p.Name).HasColumnName("name");
+            entity.Property(p => p.Color).HasColumnName("color");
+        });
+    }
+}
+```
+
+### Registration in Program.cs
+
+`AppDbContext` is registered as a scoped service and reads the connection string from `ConnectionStrings:DefaultConnection`:
+
+```csharp Program.cs
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+```
+
+## Connection String
+
+The Npgsql connection string targets Supabase's direct PostgreSQL endpoint (port 5432). SSL is required for all Supabase hosted projects.
+
+```json appsettings.Development.json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=db.your-project.supabase.co;Port=5432;Database=postgres;Username=postgres;Password=your-db-password;SSL Mode=Require;Trust Server Certificate=true"
+  }
+}
+```
+
+<Info>
+  Replace `your-project` with your Supabase project reference ID and `your-db-password` with the database password found under **Project Settings → Database → Connection string**. The `Trust Server Certificate=true` option is needed because Supabase uses a self-signed certificate on its direct PostgreSQL endpoint.
+</Info>
+
+## Full Database Schema Reference
+
+All tables below are accessed by the Supabase PostgREST SDK via the `[Table]`, `[Column]`, and `[PrimaryKey]` attributes on each C# model. The `tickets` and `priorities` tables are also mapped by EF Core in `AppDbContext`.
+
+<Tabs>
+  <Tab title="tickets">
+    The central application table. Every support request is a row here.
+
+    | Column | PostgreSQL Type | C# Property | Notes |
+    |---|---|---|---|
+    | `ticket_id` | `bigint` | `TicketId` | Primary key, auto-increment |
+    | `ticket_code` | `text` | `TicketCode` | Human-readable, e.g. `TCK-0042` |
+    | `system_id` | `integer` | `SystemId` | FK → `systems` |
+    | `category_id` | `integer` | `CategoryId` | FK → `categories` |
+    | `priority_id` | `integer` | `PriorityId` | FK → `priorities` |
+    | `risk_id` | `integer` | `RiskId` | FK → `risk_levels` |
+    | `state_id` | `integer` | `StateId` | FK → `ticket_states` (1–5) |
+    | `subject` | `text` | `Subject` | Short title |
+    | `description` | `text` | `Description` | Full request description |
+    | `justification` | `text` | `Justification` | Optional — nullable |
+    | `requester_id` | `uuid` | `RequesterId` | FK → `users` (EMPLEADO) |
+    | `assigned_to` | `uuid` | `AssignedTo` | FK → `users` (SOPORTE) |
+    | `created_at` | `timestamptz` | `CreatedAt` | Set at insert |
+    | `updated_at` | `timestamptz` | `UpdatedAt` | Updated on any change |
+    | `attachment_url` | `text` | `AttachmentUrl` | Nullable legacy field |
+  </Tab>
+
+  <Tab title="users">
+    Extended user profiles. `user_id` must match the UUID from `auth.users`.
+
+    | Column | PostgreSQL Type | C# Property | Notes |
+    |---|---|---|---|
+    | `user_id` | `uuid` | `UserId` | Primary key |
+    | `full_name` | `text` | `FullName` | Display name |
+    | `email` | `text` | `Email` | Must match Auth email |
+    | `role` | `text` | `Role` | `EMPLEADO` \| `SOPORTE` \| `SUPERUSUARIO` |
+    | `photo_url` | `text` | `PhotoUrl` | Nullable — public Storage URL |
+    | `created_at` | `timestamptz` | `CreatedAt` | Set at insert |
+  </Tab>
+
+  <Tab title="ticket_states">
+    Five fixed workflow states. Must be seeded before any tickets are created.
+
+    | Column | PostgreSQL Type | C# Property | Notes |
+    |---|---|---|---|
+    | `state_id` | `integer` | `StateId` | Primary key (1–5) |
+    | `name` | `text` | `Name` | State label |
+    | `order_number` | `smallint` | `OrderNumber` | Display sort order |
+
+    <Note>
+      `ticket_states` must contain exactly five rows with IDs 1 through 5 before the application can process ticket state transitions. The workflow engine references these IDs directly: `1=PENDIENTE`, `2=EN PROCESO`, `3=EN REVISIÓN`, `4=RESUELTO`, `5=CANCELADO`. States 4 and 5 are terminal — no further transitions are allowed from either.
+    </Note>
+  </Tab>
+
+  <Tab title="priorities">
+    Priority levels displayed as color-coded badges in the UI.
+
+    | Column | PostgreSQL Type | C# Property | Notes |
+    |---|---|---|---|
+    | `priority_id` | `integer` | `PriorityId` | Primary key |
+    | `name` | `text` | `Name` | e.g. `Alta`, `Media`, `Baja` |
+    | `color` | `text` | `Color` | Hex code, e.g. `#ef4444` |
+  </Tab>
+
+  <Tab title="categories">
+    Ticket category classifications.
+
+    | Column | PostgreSQL Type | C# Property | Notes |
+    |---|---|---|---|
+    | `category_id` | `integer` | `CategoryId` | Primary key |
+    | `name` | `text` | `Name` | e.g. `Hardware`, `Software`, `Red` |
+  </Tab>
+
+  <Tab title="risk_levels">
+    Risk levels displayed as color-coded badges, similar to priorities.
+
+    | Column | PostgreSQL Type | C# Property | Notes |
+    |---|---|---|---|
+    | `risk_id` | `integer` | `RiskId` | Primary key |
+    | `name` | `text` | `Name` | e.g. `Alto`, `Medio`, `Bajo` |
+    | `color` | `text` | `Color` | Hex color code |
+  </Tab>
+
+  <Tab title="systems">
+    The catalog of IT systems that tickets can be raised against.
+
+    | Column | PostgreSQL Type | C# Property | Notes |
+    |---|---|---|---|
+    | `system_id` | `integer` | `SystemId` | Primary key |
+    | `code` | `text` | `Code` | Short identifier, e.g. `ERP` |
+    | `name` | `text` | `Name` | Full name, e.g. `Sistema ERP Corporativo` |
+  </Tab>
+
+  <Tab title="ticket_attachments">
+    One row per uploaded file. The actual file lives in the `ticket-files` Storage bucket.
+
+    | Column | PostgreSQL Type | C# Property | Notes |
+    |---|---|---|---|
+    | `attachment_id` | `bigint` | `AttachmentId` | Primary key, auto-increment |
+    | `ticket_id` | `bigint` | `TicketId` | FK → `tickets` |
+    | `file_name` | `text` | `FileName` | Original upload filename |
+    | `file_path` | `text` | `FilePath` | Bucket path — UUID + extension |
+    | `file_url` | `text` | `FileUrl` | Public URL for download |
+    | `created_at` | `timestamptz` | `CreatedAt` | Set at insert |
+  </Tab>
+
+  <Tab title="comments">
+    The discussion thread on a ticket. Users of any role can post comments.
+
+    | Column | PostgreSQL Type | C# Property | Notes |
+    |---|---|---|---|
+    | `comment_id` | `bigint` | `CommentId` | Primary key, auto-increment |
+    | `ticket_id` | `bigint` | `TicketId` | FK → `tickets` |
+    | `user_id` | `uuid` | `UserId` | FK → `users` |
+    | `comment` | `text` | `CommentText` | The comment body |
+    | `created_at` | `timestamptz` | `CreatedAt` | Set at insert |
+  </Tab>
+</Tabs>
+
+## Seeding Reference Data
+
+After creating the tables, insert at minimum the following rows before running the application for the first time:
+
+```sql Supabase SQL Editor — seed ticket_states
+insert into ticket_states (state_id, name, order_number) values
+  (1, 'PENDIENTE',   1),
+  (2, 'EN PROCESO',  2),
+  (3, 'EN REVISIÓN', 3),
+  (4, 'RESUELTO',    4),
+  (5, 'CANCELADO',   5);
+```
+
+```sql Supabase SQL Editor — seed priorities
+insert into priorities (name, color) values
+  ('Baja',   '#22c55e'),
+  ('Media',  '#f59e0b'),
+  ('Alta',   '#ef4444'),
+  ('Crítica','#7c3aed');
+```
+
+```sql Supabase SQL Editor — seed risk_levels
+insert into risk_levels (name, color) values
+  ('Bajo',  '#22c55e'),
+  ('Medio', '#f59e0b'),
+  ('Alto',  '#ef4444');
+```
+
+<Info>
+  Categories and systems have no fixed IDs in the application logic — you can insert as many rows as your organization needs. At least one of each must exist before users can create tickets, because both fields are required on the ticket creation form.
+</Info>

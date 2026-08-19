@@ -1,0 +1,215 @@
+---
+title: "Catalog Models: States, Priorities, Categories, and Systems"
+sidebarTitle: "Catalog Models"
+description: "Reference for the TicketState, Priority, Category, RiskLevel, and SystemCatalog lookup models that drive ticket classification in HelpDesk Pro 2026."
+---
+
+Catalog models are lightweight lookup tables that populate the dropdown fields on ticket creation and edit forms. Each catalog class extends `Supabase.Postgrest.Models.BaseModel` and uses Supabase Postgrest attribute annotations to map to its corresponding Supabase table. These models are read-only from the application's perspective — their rows are seeded once in Supabase and referenced by foreign keys in the `tickets` table. The `Ticket` model resolves all five catalogs as navigation properties at query time via Postgrest `[Reference]` embeddings.
+
+<Note>
+  All catalog tables must be seeded in Supabase **before** the application can be used. An empty dropdown in any required field will block ticket creation and cause form validation errors. Run the seed script or insert rows manually in the Supabase Table Editor before onboarding users.
+</Note>
+
+---
+
+## TicketState
+
+`TicketState` maps to the `ticket_states` table and defines the stages a ticket moves through during its lifecycle. The `StateId` values are referenced directly by the state-transition logic in the application — they must be exact integers, not auto-generated.
+
+```csharp
+[Table("ticket_states")]
+public class TicketState : BaseModel
+{
+    [PrimaryKey("state_id", true)]
+    public int StateId { get; set; }
+
+    [Column("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [Column("order_number")]
+    public short OrderNumber { get; set; }
+}
+```
+
+<ResponseField name="StateId" type="int" required>
+  Primary key. The `true` flag in `[PrimaryKey("state_id", true)]` indicates this is a database-autoincrement column. However, the five required IDs must be seeded with exact values — see the tip below. Maps to column `state_id`.
+</ResponseField>
+
+<ResponseField name="Name" type="string" required>
+  Human-readable state label displayed in the UI (e.g. `PENDIENTE`, `EN PROCESO`). Maps to column `name`.
+</ResponseField>
+
+<ResponseField name="OrderNumber" type="short" required>
+  Numeric position used to sort states in dropdowns and dashboard views. Maps to column `order_number`.
+</ResponseField>
+
+The five standard states that must be seeded are:
+
+| StateId | Name        | OrderNumber |
+| ------- | ----------- | ----------- |
+| 1       | PENDIENTE   | 1           |
+| 2       | EN PROCESO  | 2           |
+| 3       | EN REVISIÓN | 3           |
+| 4       | RESUELTO    | 4           |
+| 5       | CANCELADO   | 5           |
+
+The permitted state transitions are:
+
+| From State | Allowed Next States |
+| ---------- | ------------------- |
+| 1 PENDIENTE  | 2 EN PROCESO, 5 CANCELADO |
+| 2 EN PROCESO | 3 EN REVISIÓN, 5 CANCELADO |
+| 3 EN REVISIÓN | 4 RESUELTO, 5 CANCELADO |
+| 4 RESUELTO  | *(terminal — no further transitions)* |
+| 5 CANCELADO | *(terminal — no further transitions)* |
+
+<Tip>
+  The state-transition logic in the application references `StateId` values **by their integer literals** (e.g. `if (ticket.StateId == 1)`). You must seed `ticket_states` with IDs 1–5 exactly as shown in the table above. If your Supabase sequence auto-generates different IDs, the workflow will break silently — transitions will either be blocked or allowed incorrectly. Use `INSERT INTO ticket_states (state_id, name, order_number) VALUES (...)` with explicit IDs, or set the sequence start value before inserting.
+</Tip>
+
+---
+
+## Priority
+
+`Priority` maps to the `priorities` table. Each priority record includes a hex color string used to render colored badges in ticket list and detail views, giving technicians an at-a-glance urgency indicator.
+
+```csharp
+[Table("priorities")]
+public class Priority : BaseModel
+{
+    [PrimaryKey("priority_id", true)]
+    public int PriorityId { get; set; }
+
+    [Column("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [Column("color")]
+    public string Color { get; set; } = string.Empty;
+}
+```
+
+<ResponseField name="PriorityId" type="int" required>
+  Auto-incremented primary key. No specific IDs are required by application logic — the foreign key stored in `tickets.priority_id` references whatever IDs exist in this table. Maps to column `priority_id`.
+</ResponseField>
+
+<ResponseField name="Name" type="string" required>
+  Display label for the priority level (e.g. `BAJA`, `MEDIA`, `ALTA`, `CRÍTICA`). Shown in ticket forms and list views. Maps to column `name`.
+</ResponseField>
+
+<ResponseField name="Color" type="string" required>
+  Hex color code (e.g. `#22c55e`, `#ef4444`) used to style the priority badge in the UI. The view layer reads this value directly from the navigation property `ticket.Priority.Color`. Maps to column `color`.
+</ResponseField>
+
+---
+
+## Category
+
+`Category` maps to the `categories` table. Categories classify the type of issue a ticket describes (e.g. Hardware, Software, Network, Access). Unlike `Priority` and `RiskLevel`, `Category` has no color property — it is used for filtering and reporting only.
+
+```csharp
+[Table("categories")]
+public class Category : BaseModel
+{
+    [PrimaryKey("category_id", true)]
+    public int CategoryId { get; set; }
+
+    [Column("name")]
+    public string Name { get; set; } = string.Empty;
+}
+```
+
+<ResponseField name="CategoryId" type="int" required>
+  Auto-incremented primary key. Referenced by `tickets.category_id`. Maps to column `category_id`.
+</ResponseField>
+
+<ResponseField name="Name" type="string" required>
+  Display label for the category (e.g. `Hardware`, `Software`, `Red`, `Accesos`). Shown in the ticket creation form dropdown and in ticket detail views. Maps to column `name`.
+</ResponseField>
+
+---
+
+## RiskLevel
+
+`RiskLevel` maps to the `risk_levels` table. Risk levels indicate the operational or business impact of the issue described in the ticket. Like `Priority`, each record includes a hex color for UI badge rendering.
+
+```csharp
+[Table("risk_levels")]
+public class RiskLevel : BaseModel
+{
+    [PrimaryKey("risk_id", true)]
+    public int RiskId { get; set; }
+
+    [Column("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [Column("color")]
+    public string Color { get; set; } = string.Empty;
+}
+```
+
+<ResponseField name="RiskId" type="int" required>
+  Auto-incremented primary key. Referenced by `tickets.risk_id`. Maps to column `risk_id`.
+</ResponseField>
+
+<ResponseField name="Name" type="string" required>
+  Display label for the risk level (e.g. `BAJO`, `MEDIO`, `ALTO`, `CRÍTICO`). Shown in ticket forms and list views. Maps to column `name`.
+</ResponseField>
+
+<ResponseField name="Color" type="string" required>
+  Hex color code used to style the risk badge in the UI. Read from the navigation property `ticket.Risk.Color` in views. Maps to column `color`.
+</ResponseField>
+
+---
+
+## SystemCatalog
+
+`SystemCatalog` maps to the `systems` table and represents the IT systems or products managed by the help desk (e.g. ERP, CRM, internal portals). Each ticket must be linked to exactly one system, helping route and report on issues by product area.
+
+```csharp
+[Table("systems")]
+public class SystemCatalog : BaseModel
+{
+    [PrimaryKey("system_id", true)]
+    public int SystemId { get; set; }
+
+    [Column("code")]
+    public string Code { get; set; } = string.Empty;
+
+    [Column("name")]
+    public string Name { get; set; } = string.Empty;
+}
+```
+
+<ResponseField name="SystemId" type="int" required>
+  Auto-incremented primary key. Referenced by `tickets.system_id`. Maps to column `system_id`.
+</ResponseField>
+
+<ResponseField name="Code" type="string" required>
+  A short alphanumeric code identifying the system (e.g. `ERP`, `CRM`, `HRM`). Used in ticket code generation and dashboard filters. Maps to column `code`.
+</ResponseField>
+
+<ResponseField name="Name" type="string" required>
+  Full display name of the system (e.g. `Sistema ERP`, `Portal de RRHH`). Shown in the ticket creation form dropdown and in ticket detail views. Maps to column `name`.
+</ResponseField>
+
+---
+
+## Catalog Summary
+
+<CardGroup cols={2}>
+  <Card title="ticket_states" icon="circle-half-stroke">
+    Five fixed states drive the ticket lifecycle. IDs 1–5 are hardcoded in transition logic and must be seeded with exact values.
+  </Card>
+  <Card title="priorities" icon="triangle-exclamation">
+    Urgency levels with hex color codes rendered as UI badges on ticket cards and list rows.
+  </Card>
+  <Card title="categories" icon="folder-open">
+    Issue type classification used for filtering, reporting, and routing tickets to the right team.
+  </Card>
+  <Card title="risk_levels" icon="shield-halved">
+    Operational impact levels with hex color codes. Independent of priority — a low-priority ticket can still carry a high risk level.
+  </Card>
+  <Card title="systems" icon="server">
+    IT systems or products registered in the help desk. Each ticket is scoped to exactly one system.
+  </Card>
+</CardGroup>

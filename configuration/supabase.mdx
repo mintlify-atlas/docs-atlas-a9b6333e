@@ -1,0 +1,225 @@
+---
+title: "Configure the Supabase Client and Authentication"
+sidebarTitle: "Supabase"
+description: "Set up Supabase credentials for HelpDesk Pro 2026, configure Auth and session options, create required database tables, and seed initial user roles."
+---
+
+HelpDesk Pro 2026 uses Supabase as its primary backend for three core concerns: **Auth** (sign-up, sign-in, session management), **PostgREST** (the typed C# SDK for all standard CRUD operations), and **Storage** (file uploads for ticket attachments and user profile photos). Before the application can start, you need a Supabase project, the correct tables created in its PostgreSQL database, and the URL and anon key wired into the app.
+
+## Current Setup — `SupabaseClient.cs`
+
+The Supabase connection is managed by the static `SupabClient` class in `Services/SupabaseClient.cs`. It holds a singleton `Supabase.Client` instance and exposes it via `GetClient()`, which initializes the client on first call.
+
+In the current source, the project URL and anon key are stored as hardcoded static fields:
+
+```csharp Services/SupabaseClient.cs
+using Supabase;
+
+namespace HelpDesk_Pro_2026.Services
+{
+    public static class SupabClient
+    {
+        private static string url = "https://dgrlsgmyefeijwczbyfi.supabase.co";
+
+        private static string key = "sb_publishable_fpa4WoG6wyCD8d4LFoTy2w_lpFjud65";
+
+        private static Supabase.Client? _client;
+
+        public static async Task<Supabase.Client> GetClient()
+        {
+            if (_client == null)
+            {
+                _client = new Supabase.Client(url, key);
+
+                await _client.InitializeAsync();
+            }
+
+            return _client;
+        }
+    }
+}
+```
+
+Hardcoding credentials works locally, but it means any commit carries live keys in plain text. Before deploying to staging or production, move the URL and key to configuration files that are excluded from source control.
+
+<Warning>
+  Never commit real Supabase credentials to source control. Any key pushed to a public repository should be immediately rotated in your Supabase project dashboard under **Project Settings → API**.
+</Warning>
+
+## Recommended Approach — Move Keys to Configuration
+
+Create (or update) `appsettings.Development.json` with a `Supabase` section and your database connection string. This file should be listed in `.gitignore` so it never reaches your repository.
+
+```json appsettings.Development.json
+{
+  "Supabase": {
+    "Url": "https://your-project.supabase.co",
+    "Key": "your-anon-key"
+  },
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=db.your-project.supabase.co;Port=5432;Database=postgres;Username=postgres;Password=your-db-password;SSL Mode=Require;Trust Server Certificate=true"
+  }
+}
+```
+
+Then update `SupabClient` to read from `IConfiguration` instead of static fields, and pass the configuration values in from `Program.cs` (or inject `IConfiguration` directly into the singleton factory lambda — see below).
+
+<Tip>
+  For local development without a shared file, use [.NET User Secrets](https://learn.microsoft.com/en-us/aspnet/core/security/app-secrets): run `dotnet user-secrets set "Supabase:Url" "https://..."` from the project directory. User secrets are stored outside the repo and merged into `IConfiguration` automatically in the Development environment.
+</Tip>
+
+## Session Configuration in `Program.cs`
+
+The session middleware is configured in `Program.cs` with a 2-hour idle timeout and a secure, essential cookie — required because the app stores the authenticated user's ID, role, and Supabase tokens in session state:
+
+```csharp Program.cs
+builder.Services.AddSession(options =>
+{
+    options.IdleTimeout = TimeSpan.FromHours(2);
+    options.Cookie.HttpOnly = true;
+    options.Cookie.IsEssential = true;
+});
+```
+
+The session middleware must be added to the pipeline **after** `UseRouting` and **before** `UseAuthorization`. The current `Program.cs` calls `app.UseSession()` in the correct position.
+
+<Note>
+  The `Supabase.Client` is registered as a **Singleton** in the DI container. This matches how `SupabClient` works internally — only one client instance is created for the lifetime of the application, and it is shared across all requests.
+
+  ```csharp Program.cs
+  builder.Services.AddSingleton<Supabase.Client>(serviceProvider =>
+  {
+      return SupabClient.GetClient().GetAwaiter().GetResult();
+  });
+  ```
+</Note>
+
+## Required Supabase Tables
+
+Create the following tables in your Supabase project using the SQL Editor (**Database → SQL Editor → New query**). The PostgREST SDK uses the column names listed below via the `[Column]` and `[PrimaryKey]` attributes on each C# model.
+
+<AccordionGroup>
+  <Accordion title="tickets — core ticket records">
+    The central table of the application. Every support request is stored here with its metadata, workflow state, and assignments.
+
+    | Column | Type | Notes |
+    |---|---|---|
+    | `ticket_id` | `bigint` | Primary key (auto-increment) |
+    | `ticket_code` | `text` | Human-readable code, e.g. `TCK-0042` |
+    | `system_id` | `int` | FK → `systems.system_id` |
+    | `category_id` | `int` | FK → `categories.category_id` |
+    | `priority_id` | `int` | FK → `priorities.priority_id` |
+    | `risk_id` | `int` | FK → `risk_levels.risk_id` |
+    | `state_id` | `int` | FK → `ticket_states.state_id` |
+    | `subject` | `text` | Short title of the request |
+    | `description` | `text` | Full description |
+    | `justification` | `text` | Optional — business justification |
+    | `requester_id` | `uuid` | FK → `users.user_id` (the EMPLEADO) |
+    | `assigned_to` | `uuid` | FK → `users.user_id` (the SOPORTE tech) |
+    | `created_at` | `timestamptz` | Set to `now()` on insert |
+    | `updated_at` | `timestamptz` | Updated on every state change or edit |
+    | `attachment_url` | `text` | Optional legacy URL; attachments now use `ticket_attachments` |
+  </Accordion>
+
+  <Accordion title="users — application user profiles">
+    Stores the extended profile for every registered user. A row must be created here when a Supabase Auth user is first registered — the `user_id` must match the UUID from `auth.users`.
+
+    | Column | Type | Notes |
+    |---|---|---|
+    | `user_id` | `uuid` | Primary key — matches `auth.users.id` |
+    | `full_name` | `text` | Display name |
+    | `email` | `text` | Must match the Auth email |
+    | `role` | `text` | One of: `EMPLEADO`, `SOPORTE`, `SUPERUSUARIO` |
+    | `photo_url` | `text` | Public URL from `profile-photos` bucket |
+    | `created_at` | `timestamptz` | Set to `now()` on insert |
+  </Accordion>
+
+  <Accordion title="ticket_states — workflow state definitions">
+    Lookup table for the five workflow states. Must be seeded before any tickets are created — state IDs are referenced by integer throughout the application.
+
+    | Column | Type | Notes |
+    |---|---|---|
+    | `state_id` | `int` | Primary key (1–5) |
+    | `name` | `text` | Display name, e.g. `PENDIENTE` |
+    | `order_number` | `smallint` | Controls display sort order |
+  </Accordion>
+
+  <Accordion title="priorities — ticket priority levels">
+    | Column | Type | Notes |
+    |---|---|---|
+    | `priority_id` | `int` | Primary key |
+    | `name` | `text` | e.g. `Alta`, `Media`, `Baja` |
+    | `color` | `text` | Hex color code for UI badges |
+  </Accordion>
+
+  <Accordion title="categories — ticket categories">
+    | Column | Type | Notes |
+    |---|---|---|
+    | `category_id` | `int` | Primary key |
+    | `name` | `text` | e.g. `Hardware`, `Software`, `Red` |
+  </Accordion>
+
+  <Accordion title="risk_levels — risk classification">
+    | Column | Type | Notes |
+    |---|---|---|
+    | `risk_id` | `int` | Primary key |
+    | `name` | `text` | e.g. `Alto`, `Medio`, `Bajo` |
+    | `color` | `text` | Hex color code for UI badges |
+  </Accordion>
+
+  <Accordion title="systems — affected IT systems">
+    | Column | Type | Notes |
+    |---|---|---|
+    | `system_id` | `int` | Primary key |
+    | `code` | `text` | Short code, e.g. `ERP` |
+    | `name` | `text` | Full name, e.g. `Sistema ERP Corporativo` |
+  </Accordion>
+
+  <Accordion title="ticket_attachments — per-ticket file records">
+    Each uploaded file gets one row here. Files are stored in the `ticket-files` Storage bucket; this table tracks metadata and the public URL.
+
+    | Column | Type | Notes |
+    |---|---|---|
+    | `attachment_id` | `bigint` | Primary key (auto-increment) |
+    | `ticket_id` | `bigint` | FK → `tickets.ticket_id` |
+    | `file_name` | `text` | Original filename from the upload |
+    | `file_path` | `text` | Filename used in the bucket (UUID + extension) |
+    | `file_url` | `text` | Public URL returned by Storage |
+    | `created_at` | `timestamptz` | Set to `now()` on insert |
+  </Accordion>
+
+  <Accordion title="comments — ticket discussion thread">
+    | Column | Type | Notes |
+    |---|---|---|
+    | `comment_id` | `bigint` | Primary key (auto-increment) |
+    | `ticket_id` | `bigint` | FK → `tickets.ticket_id` |
+    | `user_id` | `uuid` | FK → `users.user_id` |
+    | `comment` | `text` | The comment body |
+    | `created_at` | `timestamptz` | Set to `now()` on insert |
+  </Accordion>
+</AccordionGroup>
+
+## Required RPC Function
+
+The admin role-change feature calls a custom Postgres function via Supabase RPC. Create it manually in **SQL Editor**:
+
+```sql Supabase SQL Editor
+create or replace function admin_change_user_role(
+  target_user_id uuid,
+  new_role text
+)
+returns void
+language plpgsql
+security definer
+as $$
+begin
+  update users
+  set role = new_role
+  where user_id = target_user_id;
+end;
+$$;
+```
+
+<Warning>
+  This function uses `SECURITY DEFINER`, which means it runs with the privileges of the function owner (usually `postgres`). Restrict who can call it by revoking public execute permissions and granting it only to authenticated users or a service role as appropriate for your security model.
+</Warning>

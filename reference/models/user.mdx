@@ -1,0 +1,193 @@
+---
+title: "Usuario, Login, Register, and Profile View Models"
+sidebarTitle: "User Models"
+description: "C# model definitions for the Usuario entity and the LoginViewModel, RegisterViewModel, and EditProfileViewModel used in HelpDesk Pro 2026."
+---
+
+User-related models in HelpDesk Pro 2026 split into two categories: the `Usuario` entity, which maps directly to the `users` table in Supabase and represents a persistent user record, and three view models (`LoginViewModel`, `RegisterViewModel`, `EditProfileViewModel`) that carry form data for authentication and profile management actions. The `Usuario` class extends `Supabase.Postgrest.Models.BaseModel` and uses Postgrest attribute annotations, while the view models rely on `System.ComponentModel.DataAnnotations` for server-side validation.
+
+---
+
+## Usuario
+
+`Usuario` maps to the `users` table and is the authoritative user record in the system. It is referenced by the `Ticket` model twice — once for the requester and once for the assigned support technician — and by the `Comment` model for the comment author. The `Role` property governs what each user can see and do throughout the application.
+
+```csharp
+[Table("users")]
+public class Usuario : BaseModel
+{
+    [PrimaryKey("user_id", false)]
+    public Guid UserId { get; set; }
+
+    [Column("full_name")]
+    public string FullName { get; set; } = string.Empty;
+
+    [Column("email")]
+    public string Email { get; set; } = string.Empty;
+
+    [Column("role")]
+    public string Role { get; set; } = string.Empty;
+
+    [Column("photo_url")]
+    public string? PhotoUrl { get; set; }
+
+    [Column("created_at")]
+    public DateTime CreatedAt { get; set; }
+}
+```
+
+<ResponseField name="UserId" type="Guid" required>
+  Primary key. A UUID that matches the user's Supabase Auth `uid`. The `false` flag in `[PrimaryKey("user_id", false)]` tells Postgrest not to include it in insert payloads — the application sets it explicitly by copying the Auth UID. Maps to column `user_id`.
+</ResponseField>
+
+<ResponseField name="FullName" type="string" required>
+  The user's display name. Shown throughout the UI in ticket lists, detail views, and comments. Maps to column `full_name`.
+</ResponseField>
+
+<ResponseField name="Email" type="string" required>
+  The user's email address. Must match the address registered in Supabase Auth. Used as the login identifier. Maps to column `email`.
+</ResponseField>
+
+<ResponseField name="Role" type="string" required>
+  Controls access level across the application. Must be one of three uppercase string values: `EMPLEADO`, `SOPORTE`, or `SUPERUSUARIO`. Maps to column `role`.
+</ResponseField>
+
+<ResponseField name="PhotoUrl" type="string | null">
+  Public URL of the user's avatar image stored in the `profile-photos` Supabase Storage bucket. `null` when no photo has been uploaded; the UI falls back to a default avatar. Maps to column `photo_url`.
+</ResponseField>
+
+<ResponseField name="CreatedAt" type="DateTime" required>
+  UTC timestamp set when the user row is first inserted. Maps to column `created_at`.
+</ResponseField>
+
+<Note>
+  Role values are always stored and compared as **uppercase strings**: `"EMPLEADO"`, `"SOPORTE"`, and `"SUPERUSUARIO"`. Some controllers use case-insensitive string comparisons (e.g. `string.Equals(user.Role, "SOPORTE", StringComparison.OrdinalIgnoreCase)`) as a defensive measure, but the database values should always be uppercase to remain consistent with policy checks and view logic.
+</Note>
+
+---
+
+## LoginViewModel
+
+`LoginViewModel` is the form model bound to the `AuthController.Login` POST action. It contains only the two fields Supabase Auth requires to sign in a user with email and password.
+
+```csharp
+public class LoginViewModel
+{
+    [Required(ErrorMessage = "El correo es obligatorio.")]
+    [EmailAddress(ErrorMessage = "Ingresa un correo válido.")]
+    public string Email { get; set; } = string.Empty;
+
+    [Required(ErrorMessage = "La contraseña es obligatoria.")]
+    public string Password { get; set; } = string.Empty;
+}
+```
+
+<ResponseField name="Email" type="string" required>
+  The user's registered email address. `[Required]` and `[EmailAddress]` — the framework rejects malformed addresses before the action body executes.
+</ResponseField>
+
+<ResponseField name="Password" type="string" required>
+  The user's plaintext password, transmitted over HTTPS and passed directly to the Supabase Auth `SignIn` call. `[Required]` — no minimum-length constraint is enforced at the view model layer because Supabase Auth enforces its own password policy.
+</ResponseField>
+
+---
+
+## RegisterViewModel
+
+`RegisterViewModel` is the form model bound to the `AuthController.Register` POST action. New users self-register with a name, email, and password. The role assigned to new accounts is determined by application logic (defaulting to `EMPLEADO`), not by this view model.
+
+```csharp
+public class RegisterViewModel
+{
+    [Required(ErrorMessage = "El nombre completo es obligatorio.")]
+    [StringLength(150, ErrorMessage = "El nombre no puede superar los 150 caracteres.")]
+    public string Name { get; set; } = string.Empty;
+
+    [Required(ErrorMessage = "El correo electrónico es obligatorio.")]
+    [EmailAddress(ErrorMessage = "Ingresa un correo electrónico válido.")]
+    public string Email { get; set; } = string.Empty;
+
+    [Required(ErrorMessage = "La contraseña es obligatoria.")]
+    [MinLength(8, ErrorMessage = "La contraseña debe tener al menos 8 caracteres.")]
+    public string Password { get; set; } = string.Empty;
+
+    [Required(ErrorMessage = "Debes confirmar la contraseña.")]
+    [Compare("Password", ErrorMessage = "Las contraseñas no coinciden.")]
+    public string ConfirmPassword { get; set; } = string.Empty;
+}
+```
+
+<ResponseField name="Name" type="string" required>
+  The user's full name. `[Required]` and `[StringLength(150)]` — stored directly as `users.full_name`. Maximum 150 characters.
+</ResponseField>
+
+<ResponseField name="Email" type="string" required>
+  The email address used to create the Supabase Auth account. `[Required]` and `[EmailAddress]`. Must be unique in Supabase Auth — duplicate registration attempts return an auth error surfaced to the user.
+</ResponseField>
+
+<ResponseField name="Password" type="string" required>
+  The desired password. `[Required]` and `[MinLength(8)]` — must be at least 8 characters. Passed to the Supabase Auth `SignUp` call.
+</ResponseField>
+
+<ResponseField name="ConfirmPassword" type="string" required>
+  Confirmation field. `[Required]` and `[Compare("Password")]` — model validation fails if this does not exactly match `Password`. Never persisted to the database.
+</ResponseField>
+
+---
+
+## EditProfileViewModel
+
+`EditProfileViewModel` is the form model bound to the `ProfileController` (or equivalent) edit profile POST action. It allows an authenticated user to update their display name, avatar photo, and optionally change their password. The `Email` and `Role` fields are included for display purposes only — they are rendered as read-only in the view and are not processed on POST.
+
+```csharp
+public class EditProfileViewModel
+{
+    public string FullName { get; set; } = string.Empty;
+
+    public string Email { get; set; } = string.Empty;
+
+    public string Role { get; set; } = string.Empty;
+
+    public string? PhotoUrl { get; set; }
+
+    public IFormFile? Photo { get; set; }
+
+    public string? CurrentPassword { get; set; }
+
+    public string? NewPassword { get; set; }
+
+    public string? ConfirmPassword { get; set; }
+}
+```
+
+<ResponseField name="FullName" type="string" required>
+  The user's updated display name. Persisted to `users.full_name` on save. No `[Required]` attribute is declared at the model level — the controller validates that it is non-empty before writing.
+</ResponseField>
+
+<ResponseField name="Email" type="string">
+  Read-only in the view. Populated from the session so the user can see their current address, but changing email via this form is not supported. Not processed during POST.
+</ResponseField>
+
+<ResponseField name="Role" type="string">
+  Read-only in the view. Displayed so users are aware of their access level, but cannot be self-edited. Only a SUPERUSUARIO can change another user's role through the admin panel. Not processed during POST.
+</ResponseField>
+
+<ResponseField name="PhotoUrl" type="string | null">
+  The current avatar URL loaded from `users.photo_url`. Used to render a preview of the existing photo in the form. Replaced with the new URL after a successful upload.
+</ResponseField>
+
+<ResponseField name="Photo" type="IFormFile | null">
+  The new avatar file selected by the user. When present, the controller uploads it to the `profile-photos` Supabase Storage bucket, obtains the public URL, and updates `users.photo_url`. When absent, the existing `PhotoUrl` is retained.
+</ResponseField>
+
+<ResponseField name="CurrentPassword" type="string | null">
+  Required by the controller only when the user intends to change their password (i.e. when `NewPassword` is non-empty). Verified against Supabase Auth before the password update is applied. Not persisted.
+</ResponseField>
+
+<ResponseField name="NewPassword" type="string | null">
+  The desired new password. When non-empty the controller requires `CurrentPassword` to be provided and validates that `ConfirmPassword` matches. Minimum 6 characters enforced by the controller before passing to the Supabase Auth update call.
+</ResponseField>
+
+<ResponseField name="ConfirmPassword" type="string | null">
+  Must match `NewPassword` when changing passwords. Comparison is performed in the controller action rather than by a `[Compare]` attribute, since both fields are nullable. Never persisted.
+</ResponseField>

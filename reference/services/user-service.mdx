@@ -1,0 +1,255 @@
+---
+title: "UserService and UserAdministrationService Methods"
+sidebarTitle: "UserService"
+description: "Method reference for UserService (profile CRUD) and UserAdministrationService (admin role management via Supabase RPC) in HelpDesk Pro 2026."
+---
+
+HelpDesk Pro 2026 splits user-data concerns across two services. `UserService` handles individual profile operations — lookups, creation, and incremental updates to the `users` table via Supabase Postgrest. `UserAdministrationService` provides admin-level role management through a dedicated Supabase RPC function, making it the appropriate choice for SUPERUSUARIO operations where a database-level side effect (such as updating GoTrue metadata) is required alongside the `users` row change.
+
+---
+
+## UserService
+
+`UserService` is injected wherever the application needs to read or mutate a single user's profile. It talks directly to the `users` table through the Supabase .NET SDK's Postgrest query builder.
+
+### Class Definition
+
+```csharp
+public class UserService
+{
+    private readonly Supabase.Client _client;
+
+    public UserService(Supabase.Client client)
+    {
+        _client = client;
+    }
+}
+```
+
+---
+
+### ObtenerPorId
+
+Looks up a single user by their UUID primary key.
+
+```csharp
+Task<Usuario?> ObtenerPorId(Guid userId)
+```
+
+<ResponseField name="userId" type="Guid" required>
+  The `user_id` of the user to retrieve. This matches the UUID issued by Supabase Auth on registration.
+</ResponseField>
+
+**Returns** `Task<Usuario?>` — the `Usuario` record if found, or `null` if no row matches the given ID.
+
+---
+
+### ObtenerPorEmail
+
+Looks up a single user by their email address.
+
+```csharp
+Task<Usuario?> ObtenerPorEmail(string email)
+```
+
+<ResponseField name="email" type="string" required>
+  The email address to search for. The query performs an exact match against the `email` column.
+</ResponseField>
+
+**Returns** `Task<Usuario?>` — the matching `Usuario`, or `null` if no row exists with that email.
+
+---
+
+### ObtenerUsuarios
+
+Returns all rows from the `users` table without filtering or sorting.
+
+```csharp
+Task<List<Usuario>> ObtenerUsuarios()
+```
+
+**Returns** `Task<List<Usuario>>` — every user in the system. The list is returned in the natural database order; apply `.OrderBy()` in the caller if a specific sort is needed.
+
+---
+
+### CrearPerfil
+
+Inserts a new `Usuario` row. This is called immediately after a successful `AuthService.RegisterAsync` to create the application-level profile that mirrors the GoTrue auth record.
+
+```csharp
+Task<Usuario?> CrearPerfil(
+    Guid userId,
+    string fullName,
+    string email,
+    string role,
+    string photoUrl)
+```
+
+<ResponseField name="userId" type="Guid" required>
+  Must match the UUID returned by GoTrue after sign-up (`session.User.Id`).
+</ResponseField>
+
+<ResponseField name="fullName" type="string" required>
+  The user's display name, typically sourced from `session.User.UserMetadata["full_name"]`.
+</ResponseField>
+
+<ResponseField name="email" type="string" required>
+  The user's email address.
+</ResponseField>
+
+<ResponseField name="role" type="string" required>
+  Initial role assignment. Must be one of `"EMPLEADO"`, `"SOPORTE"`, or `"SUPERUSUARIO"`.
+</ResponseField>
+
+<ResponseField name="photoUrl" type="string" required>
+  URL for the user's profile photo. Pass an empty string or a default avatar URL if no photo is provided at registration.
+</ResponseField>
+
+**Returns** `Task<Usuario?>` — the newly inserted `Usuario` record as returned by Supabase, or `null` if the insert failed.
+
+---
+
+### ActualizarPerfil
+
+Updates a user's `FullName` and optionally their `PhotoUrl`. The method first fetches the current record via `ObtenerPorId`, applies the changes in-memory, and then calls `Update` on the full object. If `photoUrl` is `null` or empty, the existing photo URL is preserved.
+
+```csharp
+Task<Usuario?> ActualizarPerfil(Guid userId, string fullName, string? photoUrl)
+```
+
+<ResponseField name="userId" type="Guid" required>
+  The user whose profile should be updated.
+</ResponseField>
+
+<ResponseField name="fullName" type="string" required>
+  The new display name to store.
+</ResponseField>
+
+<ResponseField name="photoUrl" type="string?">
+  When non-empty, replaces the stored `PhotoUrl`. When `null` or empty, the existing value is left unchanged.
+</ResponseField>
+
+**Returns** `Task<Usuario?>` — the modified `Usuario` object (with local mutations applied), or `null` if no user was found with that ID.
+
+---
+
+### ActualizarFoto
+
+Updates only the `PhotoUrl` for a given user. Intended for the profile-photo upload flow, where the rest of the profile remains unchanged.
+
+```csharp
+Task<Usuario?> ActualizarFoto(Guid userId, string photoUrl)
+```
+
+<ResponseField name="userId" type="Guid" required>
+  The user whose photo URL should be updated.
+</ResponseField>
+
+<ResponseField name="photoUrl" type="string" required>
+  The new public URL of the uploaded photo, as returned by `StorageService.UploadProfilePhoto`.
+</ResponseField>
+
+**Returns** `Task<Usuario?>` — the updated `Usuario` object, or `null` if not found.
+
+---
+
+### CambiarRol
+
+Updates a user's `Role` in the `users` table directly via Postgrest. Only `"EMPLEADO"` and `"SOPORTE"` are accepted as valid targets; any other value (including `"SUPERUSUARIO"`) returns `false` immediately.
+
+```csharp
+Task<bool> CambiarRol(Guid userId, string nuevoRol)
+```
+
+<ResponseField name="userId" type="Guid" required>
+  The user whose role should change.
+</ResponseField>
+
+<ResponseField name="nuevoRol" type="string" required>
+  The target role. Must be exactly `"EMPLEADO"` or `"SOPORTE"` (case-sensitive).
+</ResponseField>
+
+**Returns** `Task<bool>` — `true` if the role was updated; `false` if `nuevoRol` is invalid or no user was found with the given ID.
+
+---
+
+## UserAdministrationService
+
+`UserAdministrationService` is used by the SUPERUSUARIO admin panel. Its role-change method delegates to the `admin_change_user_role` Supabase RPC function rather than updating the table directly, making it suitable when the role change needs to trigger database-level logic (e.g., updating GoTrue metadata or enforcing server-side policies).
+
+### Class Definition
+
+```csharp
+public class UserAdministrationService
+{
+    private readonly Supabase.Client _client;
+
+    public UserAdministrationService(Supabase.Client client)
+    {
+        _client = client;
+    }
+}
+```
+
+---
+
+### ObtenerTodosAsync
+
+Fetches all rows from the `users` table.
+
+```csharp
+Task<List<Usuario>> ObtenerTodosAsync()
+```
+
+**Returns** `Task<List<Usuario>>` — every user in the system as a list, in the natural database order.
+
+---
+
+### CambiarRolAsync
+
+Validates the target role and then calls the `admin_change_user_role` Supabase RPC function with `target_user_id` and `new_role` as parameters. Unlike `UserService.CambiarRol`, this method throws on invalid input rather than returning a boolean, and the underlying operation is executed at the database level via RPC.
+
+```csharp
+Task CambiarRolAsync(Guid userId, string nuevoRol)
+```
+
+<ResponseField name="userId" type="Guid" required>
+  The UUID of the user whose role should be changed.
+</ResponseField>
+
+<ResponseField name="nuevoRol" type="string" required>
+  The target role. Must be `"EMPLEADO"` or `"SOPORTE"`. Any other value throws `ArgumentException`.
+</ResponseField>
+
+**Returns** `Task` (void async).
+
+**Throws** `ArgumentException` with message `"El rol seleccionado no es válido."` if `nuevoRol` is not `"EMPLEADO"` or `"SOPORTE"`.
+
+The RPC call is made as follows:
+
+```csharp
+var parameters = new Dictionary<string, object>
+{
+    { "target_user_id", userId },
+    { "new_role", nuevoRol }
+};
+
+await _client.Rpc("admin_change_user_role", parameters);
+```
+
+---
+
+## Choosing Between the Two Services
+
+<Note>
+  `UserService.CambiarRol` and `UserAdministrationService.CambiarRolAsync` both change a user's role, but they differ in mechanism and intended caller:
+
+  | | `UserService.CambiarRol` | `UserAdministrationService.CambiarRolAsync` |
+  |---|---|---|
+  | **Mechanism** | Direct Postgrest `UPDATE` on `users` table | Supabase `Rpc("admin_change_user_role", …)` |
+  | **On invalid role** | Returns `false` | Throws `ArgumentException` |
+  | **Intended caller** | Any controller with user-update access | SUPERUSUARIO admin panel exclusively |
+  | **Database side-effects** | `users` table only | Defined by the RPC function (may include GoTrue metadata update) |
+
+  Use `UserAdministrationService.CambiarRolAsync` for admin operations initiated from the user management dashboard, and `UserService.CambiarRol` for self-service or lower-privilege role adjustments.
+</Note>

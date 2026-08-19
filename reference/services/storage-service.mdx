@@ -1,0 +1,200 @@
+---
+title: "StorageService: Profile Photo Upload to Supabase"
+sidebarTitle: "StorageService"
+description: "StorageService handles uploading user profile photos to the Supabase Storage profile-photos bucket with format validation and session auth."
+---
+
+`StorageService` is responsible for one task: uploading a user's profile photo to the `profile-photos` Supabase Storage bucket and returning the resulting public URL. Before touching the bucket, it runs a sequence of validation checks — null file, allowed extension, file size limit, and non-empty tokens — and establishes an authenticated Supabase session so the upload is performed under the user's own credentials rather than the anonymous service key.
+
+## Class Definition
+
+```csharp
+public class StorageService
+{
+    private readonly Supabase.Client _client;
+
+    private const string BUCKET_NAME = "profile-photos";
+
+    public StorageService(Supabase.Client client)
+    {
+        _client = client;
+    }
+
+    public async Task<string?> UploadProfilePhoto(
+        Guid userId,
+        IFormFile photo,
+        string accessToken,
+        string refreshToken)
+    {
+        if (photo == null || photo.Length == 0)
+            return null;
+
+        if (string.IsNullOrWhiteSpace(accessToken))
+            throw new Exception("No existe el AccessToken de Supabase.");
+
+        if (string.IsNullOrWhiteSpace(refreshToken))
+            throw new Exception("No existe el RefreshToken de Supabase.");
+
+        var extension = Path.GetExtension(photo.FileName).ToLowerInvariant();
+        var allowedExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp" };
+
+        if (!allowedExtensions.Contains(extension))
+            throw new Exception("El formato de imagen no es válido. Usa JPG, PNG o WEBP.");
+
+        if (photo.Length > 5 * 1024 * 1024)
+            throw new Exception("La imagen no puede superar los 5 MB.");
+
+        await _client.Auth.SetSession(accessToken, refreshToken);
+
+        var fileName = $"{userId}{extension}";
+
+        using var memoryStream = new MemoryStream();
+        await photo.CopyToAsync(memoryStream);
+        var fileBytes = memoryStream.ToArray();
+
+        await _client.Storage
+            .From(BUCKET_NAME)
+            .Upload(
+                fileBytes,
+                fileName,
+                new Supabase.Storage.FileOptions { Upsert = true }
+            );
+
+        var publicUrl = _client.Storage
+            .From(BUCKET_NAME)
+            .GetPublicUrl(fileName);
+
+        return publicUrl;
+    }
+}
+```
+
+---
+
+## UploadProfilePhoto
+
+Validates, authenticates, and uploads a profile photo to the `profile-photos` bucket. Returns the public URL of the uploaded file, or `null` if no file was provided.
+
+```csharp
+Task<string?> UploadProfilePhoto(
+    Guid userId,
+    IFormFile photo,
+    string accessToken,
+    string refreshToken)
+```
+
+### Parameters
+
+<ParamField path="userId" type="Guid" required>
+  The authenticated user's ID. Used as the filename prefix so each user's photo is stored as `{userId}{extension}` (e.g., `3fa85f64-5717-4562-b3fc-2c963f66afa6.jpg`).
+</ParamField>
+
+<ParamField path="photo" type="IFormFile" required>
+  The uploaded image file from the multipart form. If `null` or empty (`Length == 0`), the method returns `null` immediately without throwing.
+</ParamField>
+
+<ParamField path="accessToken" type="string" required>
+  The Supabase JWT access token from the current user's session (`HttpContext.Session.GetString("AccessToken")`). Required to authenticate the storage upload under the user's identity.
+</ParamField>
+
+<ParamField path="refreshToken" type="string" required>
+  The Supabase refresh token from the current user's session (`HttpContext.Session.GetString("RefreshToken")`). Passed to `Auth.SetSession` alongside the access token.
+</ParamField>
+
+### Validation Steps
+
+The method runs checks in the following order before any network call is made:
+
+<Steps>
+  <Step title="Null / empty file check">
+    If `photo` is `null` or `photo.Length == 0`, the method returns `null` immediately. No exception is thrown — the caller treats a missing photo as a no-op.
+  </Step>
+  <Step title="Token validation">
+    If `accessToken` is null or whitespace, throws `Exception("No existe el AccessToken de Supabase.")`.  
+    If `refreshToken` is null or whitespace, throws `Exception("No existe el RefreshToken de Supabase.")`.
+  </Step>
+  <Step title="Extension check">
+    Extracts the file extension from `photo.FileName` and lower-cases it. Allowed values: `.jpg`, `.jpeg`, `.png`, `.webp`. Any other extension throws `Exception("El formato de imagen no es válido. Usa JPG, PNG o WEBP.")`.
+  </Step>
+  <Step title="File size limit">
+    If `photo.Length > 5 242 880` bytes (5 MB), throws `Exception("La imagen no puede superar los 5 MB.")`.
+  </Step>
+</Steps>
+
+### Upload Process
+
+After validation passes, the method performs these steps:
+
+<Steps>
+  <Step title="Set auth session">
+    Calls `_client.Auth.SetSession(accessToken, refreshToken)` so the Supabase client is authenticated as the current user before the storage request is made.
+  </Step>
+  <Step title="Build filename">
+    Constructs the storage path as `{userId}{extension}`. Because the filename is deterministic (tied to the user's UUID), uploading a new photo overwrites the previous one.
+  </Step>
+  <Step title="Read file to byte array">
+    Copies `photo` into a `MemoryStream` and converts it to `byte[]` for the Supabase Storage SDK upload call.
+  </Step>
+  <Step title="Upload with Upsert">
+    Calls `_client.Storage.From("profile-photos").Upload(fileBytes, fileName, new FileOptions { Upsert = true })`. The `Upsert = true` option replaces any existing object at that path.
+  </Step>
+  <Step title="Retrieve public URL">
+    Calls `_client.Storage.From("profile-photos").GetPublicUrl(fileName)` and returns the resulting URL string.
+  </Step>
+</Steps>
+
+### Return Value
+
+<ResponseField name="publicUrl" type="string?">
+  The publicly accessible URL of the uploaded photo in the `profile-photos` bucket. Pass this value to `UserService.ActualizarFoto` to persist it on the user's profile row. Returns `null` only when `photo` is null or empty.
+</ResponseField>
+
+---
+
+## Exceptions
+
+| Condition | Message |
+|-----------|---------|
+| `accessToken` is null or whitespace | `"No existe el AccessToken de Supabase."` |
+| `refreshToken` is null or whitespace | `"No existe el RefreshToken de Supabase."` |
+| Extension not in `.jpg/.jpeg/.png/.webp` | `"El formato de imagen no es válido. Usa JPG, PNG o WEBP."` |
+| File size exceeds 5 MB | `"La imagen no puede superar los 5 MB."` |
+
+---
+
+## Bucket Configuration
+
+<Note>
+  The bucket name is defined as the class constant `BUCKET_NAME = "profile-photos"`. Make sure this bucket exists in your Supabase project before deploying. You can create it from the Supabase dashboard under **Storage → New bucket**, or via the Supabase CLI:
+
+  ```bash
+  supabase storage create profile-photos --public
+  ```
+
+  Setting the bucket to **public** is required for `GetPublicUrl()` to return a URL that browsers can access without authentication.
+</Note>
+
+<Warning>
+  `UploadProfilePhoto` uploads with `Upsert = true`, which means uploading a new photo **silently replaces** the existing file at the same path (`{userId}{extension}`). There is no versioning or backup of the previous image. If you need to retain old profile photos, change the filename strategy to include a timestamp or UUID instead of using only the user ID.
+</Warning>
+
+## Usage Example
+
+The typical call sequence in a profile-update controller action looks like this:
+
+```csharp
+// 1. Upload the new photo and get the public URL
+var photoUrl = await _storageService.UploadProfilePhoto(
+    userId:       currentUserId,
+    photo:        model.Photo,           // IFormFile from the form
+    accessToken:  HttpContext.Session.GetString("AccessToken")!,
+    refreshToken: HttpContext.Session.GetString("RefreshToken")!
+);
+
+// 2. Persist the URL to the users table
+if (photoUrl != null)
+{
+    await _userService.ActualizarFoto(currentUserId, photoUrl);
+    HttpContext.Session.SetString("PhotoUrl", photoUrl);
+}
+```

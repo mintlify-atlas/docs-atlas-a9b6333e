@@ -1,0 +1,119 @@
+{
+  "projectType": "saas",
+  "projectName": "HelpDesk Pro 2026",
+  "projectDescription": "A full-stack IT help desk ticketing system built with ASP.NET Core MVC and Supabase, enabling employees to submit support tickets and technicians to manage, triage, and resolve them through a role-based workflow.",
+  "theme": "almond",
+  "primaryColor": "#003d9b",
+  "lightColor": "#e8eef8",
+  "darkColor": "#002868",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/tickets",
+              "features/workflow",
+              "features/attachments",
+              "features/dashboard"
+            ]
+          },
+          {
+            "group": "User Management",
+            "pages": [
+              "users/roles",
+              "users/profile",
+              "users/admin"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/supabase",
+              "configuration/database",
+              "configuration/storage"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Data Models",
+            "pages": [
+              "reference/models/ticket",
+              "reference/models/user",
+              "reference/models/catalogs"
+            ]
+          },
+          {
+            "group": "Services",
+            "pages": [
+              "reference/services/ticket-service",
+              "reference/services/auth-service",
+              "reference/services/user-service",
+              "reference/services/storage-service"
+            ]
+          },
+          {
+            "group": "Controllers",
+            "pages": [
+              "reference/controllers/tickets",
+              "reference/controllers/account",
+              "reference/controllers/users"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Role-based access control with three roles: EMPLEADO (employee), SOPORTE (support technician), and SUPERUSUARIO (super admin)",
+    "Ticket lifecycle management with a strict state transition workflow (PENDIENTE → EN PROCESO → EN REVISIÓN → RESUELTO / CANCELADO)",
+    "Automatic ticket assignment to the least-busy available support technician",
+    "Multi-file attachment support stored in Supabase Storage (ticket-files bucket)",
+    "Threaded comment system on tickets with per-user edit/delete permissions",
+    "Analytics dashboard with Chart.js bar chart showing tickets by priority, powered by EF Core",
+    "User profile management with photo upload to Supabase Storage (profile-photos bucket)",
+    "Advanced ticket filtering by user, date range, state, and system",
+    "Super admin user role management panel (SUPERUSUARIO-only)",
+    "Supabase Auth integration for registration, login, logout, and password change"
+  ],
+  "publicApiSurface": [
+    "GET /Tickets — List and filter tickets (role-scoped)",
+    "GET /Tickets/Create — New ticket form (EMPLEADO, SUPERUSUARIO only)",
+    "POST /Tickets/Create — Submit a new ticket",
+    "GET /Tickets/Edit/{id} — View/edit a ticket with comments",
+    "POST /Tickets/Edit/{id} — Update ticket fields",
+    "POST /Tickets/UpdateState — Advance ticket state in workflow",
+    "POST /Tickets/AddComment — Add a comment to a ticket",
+    "POST /Tickets/UpdateComment — Edit an existing comment (owner only)",
+    "POST /Tickets/DeleteComment — Delete a comment (owner only)",
+    "POST /Tickets/DeleteAttachment — Remove an attachment from storage and DB",
+    "GET /Account/Login — Login page",
+    "POST /Account/Login — Authenticate with Supabase",
+    "GET /Account/Register — Registration page",
+    "POST /Account/Register — Create new account via Supabase Auth",
+    "GET /Account/Logout — Sign out and clear session",
+    "GET /Users/Profile — View current user profile",
+    "POST /Users/Profile — Update name, photo, or password",
+    "GET /Users/Index — Admin user list (SUPERUSUARIO only)",
+    "POST /Users/CambiarRol — Change a user's role (SUPERUSUARIO only)",
+    "GET /Home/Dashboard — Priority analytics dashboard (SOPORTE, SUPERUSUARIO only)",
+    "ITicketService.GetTicketsAsync(userId, userRole, filters) — Role-aware ticket retrieval",
+    "ITicketService.CreateTicketAsync(model, requesterId) — Creates ticket with auto-assignment",
+    "ITicketService.UpdateTicketStateAsync(ticketId, newStateId, userId, userRole) — Enforces state machine transitions",
+    "StorageService.UploadProfilePhoto(userId, photo, accessToken, refreshToken) — Upload to profile-photos bucket"
+  ]
+}

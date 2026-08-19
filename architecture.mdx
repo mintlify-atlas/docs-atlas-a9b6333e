@@ -1,0 +1,197 @@
+---
+title: "Application Architecture: MVC, Supabase, and EF Core"
+sidebarTitle: "Architecture"
+description: "The layered design of HelpDesk Pro 2026 — MVC controllers, a scoped service layer, Supabase Postgrest for CRUD operations, and EF Core for analytics."
+---
+
+HelpDesk Pro 2026 follows a classic layered architecture built on ASP.NET Core MVC. HTTP requests are handled by controllers, which delegate business logic to a set of scoped services. Those services talk to a Supabase PostgreSQL backend through two distinct channels: the **Supabase .NET SDK** (Postgrest) for the main application data, and an **EF Core `AppDbContext`** (via Npgsql) for the analytics dashboard. Authentication is managed by Supabase Auth and surfaced to the ASP.NET Core layer through server-side sessions.
+
+## Architecture Overview
+
+```text
+Browser
+  │
+  ▼
+[ASP.NET Core MVC Controller]
+  │   (validates session, reads Role from HttpContext.Session)
+  ▼
+[Service Layer]  ──────────────────────────────────────┐
+  │  AuthService / UserService / TicketService / etc.  │
+  ▼                                                    ▼
+[Supabase .NET SDK]                          [AppDbContext (EF Core)]
+  │  Postgrest ORM for tickets, users,        │  Npgsql direct to PostgreSQL
+  │  comments, priorities, attachments        │  Used only for analytics
+  ▼                                           ▼
+[Supabase PostgreSQL Database] ◄─────────────┘
+```
+
+<Tabs>
+  <Tab title="Request Flow">
+    Every page request travels through the same pipeline defined in `Program.cs`:
+
+    1. **Middleware pipeline** — HTTPS redirection → static files → routing → session → authorization.
+    2. **Controller** — The matched controller action is invoked. Controllers read the `UserId`, `Role`, and `AccessToken` values from `HttpContext.Session` to gate access. If any required key is absent the user is redirected to `/Account/Login`.
+    3. **Service call** — The controller resolves one or more scoped services (injected via the DI container) and invokes async methods that encapsulate all database interaction.
+    4. **Supabase Client** — Services use the singleton `Supabase.Client` (registered in DI via `SupabClient.GetClient()`) to execute Postgrest queries against the Supabase-hosted PostgreSQL database.
+    5. **View rendering** — The controller passes a typed view model to a Razor `.cshtml` view. TailwindCSS classes handle layout and styling; Chart.js scripts render charts on the analytics dashboard.
+
+    ```csharp
+    // Program.cs — middleware order
+    app.UseHttpsRedirection();
+    app.UseRouting();
+    app.UseStaticFiles();
+    app.UseSession();          // must come before UseAuthorization
+    app.UseAuthorization();
+    ```
+
+    <Info>
+      The default route maps to `TicketsController.Index`, not the Home page, so authenticated users land directly on the ticket list after login.
+    </Info>
+  </Tab>
+
+  <Tab title="Data Access">
+    HelpDesk Pro 2026 uses **two separate data access paths** against the same underlying PostgreSQL database. Which path is used depends entirely on the operation.
+
+    ### Supabase .NET SDK (Primary Path)
+
+    All create, read, update, and delete operations for tickets, users, comments, priorities, categories, and attachments go through the `Supabase.Client` singleton. The SDK maps C# model classes (which inherit `Supabase.Postgrest.Models.BaseModel`) to Supabase tables using `[Table]` and `[Column]` attributes.
+
+    ```csharp
+    // Example: fetch all tickets assigned to a support user
+    var tickets = await _client
+        .From<Ticket>()
+        .Where(t => t.AssignedTo == userId)
+        .Get();
+    ```
+
+    Models used by the Supabase SDK include: `Ticket`, `Usuario`, `Comment`, `Priority`, `Category`, `TicketAttachment`, `TicketState`, `RiskLevel`, and `SystemCatalog`.
+
+    ### EF Core + Npgsql (Analytics Path)
+
+    The `AppDbContext` provides a **lightweight, read-focused** data layer used exclusively by the SUPERUSUARIO analytics dashboard. It defines only two entities, mapped directly to the shared Supabase tables:
+
+    ```csharp
+    // Data/AppDbContext.cs
+    public class EfTicket
+    {
+        public long TicketId { get; set; }
+        public int PriorityId { get; set; }
+        public string Subject { get; set; } = string.Empty;
+        public DateTime CreatedAt { get; set; }
+        public EfPriority? Priority { get; set; }
+    }
+
+    public class EfPriority
+    {
+        public int PriorityId { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public string Color { get; set; } = string.Empty;
+    }
+    ```
+
+    The context is registered as a scoped service and connects via the `DefaultConnection` Npgsql connection string:
+
+    ```csharp
+    builder.Services.AddDbContext<AppDbContext>(options =>
+        options.UseNpgsql(
+            builder.Configuration.GetConnectionString("DefaultConnection")));
+    ```
+
+    Table and column names are configured explicitly in `OnModelCreating` to match the Supabase schema (`tickets`, `priorities`, `ticket_id`, `priority_id`, etc.).
+
+    <Note>
+      EF Core is **never used for writes**. All mutations go through the Supabase SDK so that Supabase's row-level security policies and real-time triggers are always respected.
+    </Note>
+  </Tab>
+
+  <Tab title="Authentication">
+    Authentication is a two-phase process: **Supabase Auth** validates credentials and issues tokens; **ASP.NET Core Session** carries identity state between requests.
+
+    ### Sign-in Flow
+
+    ```
+    POST /Account/Login
+      │
+      ▼
+    AuthService.LoginAsync(email, password)
+      │  calls Supabase.Client.Auth.SignIn(...)
+      ▼
+    Session? returned with AccessToken + RefreshToken + User
+      │
+      ▼
+    UserService.ObtenerPorId(userId)
+      │  fetches the matching row from the `usuarios` table
+      ▼
+    HttpContext.Session.SetString(...)
+      stores: UserId, FullName, Email, Role, PhotoUrl,
+              AccessToken, RefreshToken
+      │
+      ▼
+    Redirect → TicketsController.Index
+    ```
+
+    ### Session Keys
+
+    | Key             | Type     | Description                                      |
+    |-----------------|----------|--------------------------------------------------|
+    | `UserId`        | `string` | UUID of the authenticated user                   |
+    | `FullName`      | `string` | Display name from the `usuarios` table           |
+    | `Email`         | `string` | User's email address                             |
+    | `Role`          | `string` | `EMPLEADO`, `SOPORTE`, or `SUPERUSUARIO`         |
+    | `PhotoUrl`      | `string` | Public URL of the avatar in `profile-photos`     |
+    | `AccessToken`   | `string` | Supabase JWT — used for authenticated SDK calls  |
+    | `RefreshToken`  | `string` | Supabase refresh token for extending the session |
+
+    ### Session Configuration
+
+    Sessions are configured in `Program.cs` with a **2-hour idle timeout** and an `HttpOnly`, essential cookie:
+
+    ```csharp
+    builder.Services.AddSession(options =>
+    {
+        options.IdleTimeout = TimeSpan.FromHours(2);
+        options.Cookie.HttpOnly = true;
+        options.Cookie.IsEssential = true;
+    });
+    ```
+
+    Controllers read `HttpContext.Session.GetString("Role")` on each request to enforce role-based access. There is no ASP.NET Core Identity or `[Authorize]` attribute middleware — access control is handled manually inside each action method.
+
+    ### Registration Flow
+
+    New users are created via `AuthService.RegisterAsync(email, password, fullName)`, which calls `Supabase.Client.Auth.SignUp(...)` and passes `full_name` as user metadata. The profile row in the `usuarios` table is inserted separately after successful sign-up, and the account begins with the **EMPLEADO** role.
+  </Tab>
+</Tabs>
+
+## Registered Services
+
+All application services are registered with a **scoped lifetime** (one instance per HTTP request) in `Program.cs`. The `Supabase.Client` singleton is the only non-scoped registration.
+
+| Service Registration | Lifetime | Responsibility |
+|---|---|---|
+| `Supabase.Client` | Singleton | Holds the initialized Supabase connection; shared across all requests |
+| `AuthService` | Scoped | Sign-up, sign-in, password change via Supabase Auth |
+| `UserService` | Scoped | CRUD for the `usuarios` table; profile photo management |
+| `StorageService` | Scoped | Upload and delete files in `ticket-files` and `profile-photos` buckets |
+| `UserAdministrationService` | Scoped | Role promotion/demotion; user listing for the Admin panel |
+| `ITicketService → TicketService` | Scoped | Full ticket lifecycle — create, assign, state transitions, comments |
+
+```csharp
+// Program.cs — service registrations
+builder.Services.AddSingleton<Supabase.Client>(serviceProvider =>
+{
+    return SupabClient.GetClient().GetAwaiter().GetResult();
+});
+
+builder.Services.AddScoped<AuthService>();
+builder.Services.AddScoped<UserService>();
+builder.Services.AddScoped<StorageService>();
+builder.Services.AddScoped<UserAdministrationService>();
+builder.Services.AddScoped<ITicketService, TicketService>();
+```
+
+`ITicketService` is the only service registered against an interface, which allows the ticket implementation to be swapped or mocked in tests without changing controllers.
+
+<Note>
+  **Dual data access is intentional.** The Supabase SDK is used for all writes and most reads because it respects Supabase row-level security (RLS) policies. EF Core is used only for the analytics dashboard because it makes complex aggregation queries (grouping tickets by priority, counting by date range) easier to express in LINQ than in raw Postgrest filters. Both paths connect to the same PostgreSQL instance.
+</Note>

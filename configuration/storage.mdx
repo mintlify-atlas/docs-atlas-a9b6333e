@@ -1,0 +1,151 @@
+---
+title: "Supabase Storage Buckets for Files and Avatars"
+sidebarTitle: "Storage"
+description: "HelpDesk Pro 2026 uses two Supabase Storage buckets: ticket-files for attachments and profile-photos for user avatars. Learn how to set them up."
+---
+
+HelpDesk Pro 2026 stores two categories of user-uploaded binary content in Supabase Storage: files attached to support tickets and user profile photos. Each category lives in its own dedicated bucket with different naming conventions, file validation rules, and upload behaviors. Both buckets must be created manually in the Supabase dashboard before the application can upload or serve files.
+
+## Required Buckets
+
+<CardGroup cols={2}>
+  <Card title="ticket-files" icon="paperclip">
+    Stores all files uploaded as ticket attachments. Accepts any file type. Files are named with a random UUID plus the original extension. Referenced in `TicketService.cs` as the string literal `"ticket-files"`.
+  </Card>
+  <Card title="profile-photos" icon="circle-user">
+    Stores user avatar images. Restricted to `.jpg`, `.jpeg`, `.png`, and `.webp` files up to 5 MB. Files are named using the user's UUID plus their file extension. Defined in `StorageService.cs` as `BUCKET_NAME = "profile-photos"`.
+  </Card>
+</CardGroup>
+
+## Bucket Details
+
+### `ticket-files` — Ticket Attachments
+
+The `ticket-files` bucket is managed entirely within `TicketService`. When a ticket is created or edited with attached files, each file is uploaded with a randomly-generated UUID filename that preserves the original extension:
+
+```csharp Services/TicketService.cs
+var extension = Path.GetExtension(file.FileName);
+var fileNameInBucket = $"{Guid.NewGuid()}{extension}";
+
+await _supabase.Storage
+    .From("ticket-files")
+    .Upload(fileBytes, fileNameInBucket);
+
+var publicUrl = _supabase.Storage
+    .From("ticket-files")
+    .GetPublicUrl(fileNameInBucket);
+```
+
+The returned `publicUrl` is stored in `ticket_attachments.file_url`, and `fileNameInBucket` (the UUID path) is stored in `ticket_attachments.file_path`. The original filename from the user's device is preserved separately in `ticket_attachments.file_name` for display purposes.
+
+**Deletion** removes the file from the bucket first, then deletes the database record:
+
+```csharp Services/TicketService.cs
+await _supabase.Storage
+    .From("ticket-files")
+    .Remove(new List<string> { attachment.FilePath });
+
+await _supabase.From<TicketAttachment>()
+    .Where(a => a.AttachmentId == attachmentId)
+    .Delete();
+```
+
+<Info>
+  There is no file-type restriction or size limit enforced in the application code for ticket attachments. If you need to restrict uploads (e.g., block executable files), add validation in `TicketService.UploadAttachmentsAsync` or configure a Supabase Storage policy.
+</Info>
+
+### `profile-photos` — User Avatars
+
+The `profile-photos` bucket is managed by `StorageService`. The bucket name is defined as a constant:
+
+```csharp Services/StorageService.cs
+private const string BUCKET_NAME = "profile-photos";
+```
+
+Files are named using the user's UUID concatenated with the file extension — this means every user has exactly one file path in the bucket, and re-uploading a photo overwrites the previous one via `Upsert = true`:
+
+```csharp Services/StorageService.cs
+var fileName = $"{userId}{extension}";
+
+await _client.Storage
+    .From(BUCKET_NAME)
+    .Upload(
+        fileBytes,
+        fileName,
+        new Supabase.Storage.FileOptions
+        {
+            Upsert = true
+        }
+    );
+
+var publicUrl = _client.Storage
+    .From(BUCKET_NAME)
+    .GetPublicUrl(fileName);
+```
+
+#### Validation Rules
+
+`StorageService.UploadProfilePhoto()` enforces the following checks before uploading:
+
+<CardGroup cols={2}>
+  <Card title="Allowed Extensions" icon="file-image">
+    `.jpg`, `.jpeg`, `.png`, `.webp` — any other extension throws an exception with a user-facing message.
+  </Card>
+  <Card title="Maximum File Size" icon="weight-scale">
+    5 MB (`5 * 1024 * 1024` bytes) — files exceeding this limit throw an exception before any upload is attempted.
+  </Card>
+</CardGroup>
+
+#### Session Auth Requirement
+
+Uploading a profile photo requires a valid Supabase Auth session. Before calling `Storage.Upload`, `StorageService` sets the user's session on the client using the access and refresh tokens stored in the application session:
+
+```csharp Services/StorageService.cs
+await _client.Auth.SetSession(
+    accessToken,
+    refreshToken
+);
+```
+
+Both tokens are validated for null/empty before the upload proceeds. If either token is missing, the method throws before reaching the Storage API.
+
+<Warning>
+  If the user's Supabase session has expired (tokens are invalid), `SetSession` will fail and the upload will not proceed. The application stores tokens in the ASP.NET Core session with a 2-hour idle timeout — sessions that have been idle longer than 2 hours will need to re-authenticate before uploading photos.
+</Warning>
+
+## Creating Buckets in the Supabase Dashboard
+
+<Steps>
+  <Step title="Open the Storage section">
+    In your Supabase project dashboard, click **Storage** in the left sidebar.
+  </Step>
+  <Step title="Create the ticket-files bucket">
+    Click **New bucket**. Enter `ticket-files` as the bucket name. Enable the **Public bucket** toggle so that file URLs work without authentication headers. Click **Save**.
+  </Step>
+  <Step title="Create the profile-photos bucket">
+    Click **New bucket** again. Enter `profile-photos` as the bucket name. Enable the **Public bucket** toggle. Click **Save**.
+  </Step>
+  <Step title="Verify both buckets appear in the list">
+    You should see `ticket-files` and `profile-photos` listed under **Storage**. The bucket names must match exactly — the application references them as string literals and the constant `BUCKET_NAME`.
+  </Step>
+</Steps>
+
+## Public vs. Private Access
+
+Both buckets should be configured as **public** (or have a public-read RLS policy). The application retrieves public URLs via `GetPublicUrl()` and stores them directly in the database — these URLs are later rendered in `<img>` tags and download links without any additional auth headers.
+
+<Warning>
+  Supabase Storage buckets have Row Level Security (RLS) policies that are independent of the public/private toggle. Even for a public bucket, you must verify that your RLS policies allow:
+
+  - **Authenticated users** to `INSERT` (upload) objects into each bucket
+  - **Public (anon role)** or **authenticated users** to `SELECT` (read/download) objects
+
+  If upload attempts return `403 Forbidden` errors, check **Storage → Policies** for each bucket and add the missing `INSERT` policy for the `authenticated` role.
+</Warning>
+
+## Storage Reference Summary
+
+| Bucket | Constant / Literal | File Naming | Allowed Types | Size Limit | Upsert |
+|---|---|---|---|---|---|
+| `ticket-files` | String literal in `TicketService` | `{uuid}{ext}` | Any | None enforced | No |
+| `profile-photos` | `BUCKET_NAME` in `StorageService` | `{userId}{ext}` | `.jpg`, `.jpeg`, `.png`, `.webp` | 5 MB | Yes |

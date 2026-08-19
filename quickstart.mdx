@@ -1,47 +1,168 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with HelpDesk Pro 2026 Locally"
+sidebarTitle: "Quickstart"
+description: "Clone the repo, configure Supabase credentials and a Postgres connection string, run the app locally, and register your first account in minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through running HelpDesk Pro 2026 on your local machine. You will need the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), a free [Supabase](https://supabase.com) account, and either Visual Studio 2022+ or VS Code with the C# Dev Kit extension.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Warning>
+  **Never commit real Supabase credentials to source control.** The `SupabClient.cs` file currently contains a hardcoded URL and anon key (see Step 4). Before pushing to any public or shared repository, move those values into `appsettings.Development.json` and ensure that file is listed in `.gitignore`.
+</Warning>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Clone the repository">
+    Open a terminal and clone the project from GitHub:
 
     ```bash
-    npm install your-package
+    git clone https://github.com/Juan-VM/HelpDesk_Pro_2026.git
+    cd HelpDesk_Pro_2026
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Open the solution">
+    Open the solution file in your preferred editor:
 
     ```bash
-    your-cli init
+    # Visual Studio — double-click, or:
+    start HelpDesk_Pro_2026.sln
+
+    # VS Code
+    code HelpDesk_Pro_2026/
     ```
+
+    The project targets **net10.0** (`HelpDesk_Pro_2026.csproj`) and uses implicit usings and nullable reference types.
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Create a Supabase project">
+    1. Go to [supabase.com](https://supabase.com) and create a new project.
+    2. Once the project is provisioned, navigate to **Settings → API**.
+    3. Copy the two values you will need:
+       - **Project URL** — e.g. `https://xxxxxxxxxxxxxxxxxxxx.supabase.co`
+       - **anon / public key** — the `anon` key listed under *Project API keys*
+
+    <Tip>
+      You will also need the **Database connection string** from **Settings → Database → Connection string → .NET (Npgsql)**. It looks like `Host=db.xxxx.supabase.co;Database=postgres;Username=postgres;Password=your-password`.
+    </Tip>
+  </Step>
+
+  <Step title="Configure credentials in appsettings.Development.json">
+    Create (or update) `HelpDesk_Pro_2026/appsettings.Development.json` with your Supabase project values. This file is loaded automatically when `ASPNETCORE_ENVIRONMENT=Development` (set by default in `launchSettings.json`).
+
+    ```json
+    {
+      "Supabase": {
+        "Url": "https://YOUR_PROJECT_ID.supabase.co",
+        "Key": "YOUR_SUPABASE_ANON_KEY"
+      },
+      "ConnectionStrings": {
+        "DefaultConnection": "Host=db.YOUR_PROJECT_ID.supabase.co;Database=postgres;Username=postgres;Password=YOUR_DB_PASSWORD;SSL Mode=Require;Trust Server Certificate=true"
+      }
+    }
+    ```
+
+    The `DefaultConnection` string is consumed by `AppDbContext` (EF Core) for analytics queries:
+
+    ```csharp
+    builder.Services.AddDbContext<AppDbContext>(options =>
+        options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+    ```
+
+    **Move hardcoded credentials out of `SupabClient.cs`.**  
+    The current `SupabClient.cs` reads URL and key as string literals. Replace them with configuration injection:
+
+    ```csharp
+    // Services/SupabClient.cs — updated version
+    public static class SupabClient
+    {
+        private static Supabase.Client? _client;
+
+        public static async Task<Supabase.Client> GetClient(IConfiguration config)
+        {
+            if (_client == null)
+            {
+                var url = config["Supabase:Url"]!;
+                var key = config["Supabase:Key"]!;
+                _client = new Supabase.Client(url, key);
+                await _client.InitializeAsync();
+            }
+            return _client;
+        }
+    }
+    ```
+
+    Then update the singleton registration in `Program.cs`:
+
+    ```csharp
+    builder.Services.AddSingleton<Supabase.Client>(serviceProvider =>
+    {
+        var config = serviceProvider.GetRequiredService<IConfiguration>();
+        return SupabClient.GetClient(config).GetAwaiter().GetResult();
+    });
+    ```
+
+    <Warning>
+      Add `appsettings.Development.json` to your `.gitignore` if it is not already present. The production `appsettings.json` in source control should contain only placeholder values or be omitted entirely.
+    </Warning>
+  </Step>
+
+  <Step title="Run the application">
+    Restore packages and start the development server:
 
     ```bash
-    your-cli start
+    cd HelpDesk_Pro_2026
+    dotnet run
     ```
+
+    The app starts on `http://localhost:5173` (HTTP) and `https://localhost:7066` (HTTPS) as defined in `Properties/launchSettings.json`. Your browser should open automatically.
+
+    <Info>
+      On first run, `AppDbContext` connects to your Supabase PostgreSQL database. Make sure the `tickets` and `priorities` tables exist in Supabase before navigating to the analytics dashboard.
+    </Info>
+  </Step>
+
+  <Step title="Register the first account">
+    Navigate to `/Account/Register` and complete the registration form. Provide:
+    - Full name
+    - Email address
+    - Password
+
+    The new account is created in Supabase Auth and a corresponding profile record is inserted into the `usuarios` table. The default role assigned is **EMPLEADO**.
+  </Step>
+
+  <Step title="Assign the SUPERUSUARIO role">
+    Because the first account starts as EMPLEADO, you need to bootstrap a super admin. You have two options:
+
+    <Tabs>
+      <Tab title="Via Supabase Dashboard (Bootstrap)">
+        Open your Supabase project, go to **Table Editor → usuarios**, find the row for your account, and set the `role` column to `SUPERUSUARIO`. Save the row.
+
+        ```sql
+        -- Or run this in the Supabase SQL Editor:
+        UPDATE usuarios
+        SET role = 'SUPERUSUARIO'
+        WHERE email = 'your-email@example.com';
+        ```
+      </Tab>
+      <Tab title="Via Admin Panel (Subsequent Users)">
+        Once at least one SUPERUSUARIO exists, log in with that account and navigate to **Admin → Manage Users**. From the `AdminUsersController`-powered panel, click **Change Role** next to any user to promote or demote them without touching the database.
+      </Tab>
+    </Tabs>
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## What's next?
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+After your first SUPERUSUARIO is set up, you can:
+
+<CardGroup cols={3}>
+  <Card title="Explore the Architecture" icon="sitemap" href="architecture">
+    Understand the MVC layer, service registrations, and dual data access pattern.
+  </Card>
+  <Card title="Create a Ticket" icon="ticket" href="/features/tickets">
+    Log in as an EMPLEADO and submit your first support ticket.
+  </Card>
+  <Card title="Manage Users" icon="users-gear" href="/users/roles">
+    Use the SUPERUSUARIO panel to create and assign roles to your team.
+  </Card>
+</CardGroup>
