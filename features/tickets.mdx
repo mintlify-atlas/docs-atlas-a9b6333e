@@ -1,5 +1,5 @@
 ---
-title: "Create, Edit, and Filter Support Tickets"
+title: "Create, Edit, Filter, and Comment on Support Tickets"
 sidebarTitle: "Tickets"
 description: "Walk through the full ticket management lifecycle — creating, editing, filtering, and commenting on IT support tickets in HelpDesk Pro 2026."
 ---
@@ -46,7 +46,7 @@ This produces codes like `TCK-0001`, `TCK-0042`, `TCK-0150`, and so on.
 
 ### Automatic Technician Assignment
 
-New tickets are assigned automatically by `GetAutoAssignedTechAsync()`. The method queries all users with the `SOPORTE` role, counts their currently active tickets (states 1–3, excluding RESUELTO and CANCELADO), and selects the technician with the lowest active workload.
+New tickets are assigned automatically by `GetAutoAssignedTechAsync()`. The method queries all users with the `SOPORTE` role, counts their currently active tickets (any ticket where `StateId != 4` and `StateId != 5` — i.e. not RESUELTO and not CANCELADO), and selects the technician with the lowest active workload.
 
 ```csharp
 var leastBusyTech = supportUsers

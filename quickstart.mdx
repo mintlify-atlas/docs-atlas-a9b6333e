@@ -1,5 +1,5 @@
 ---
-title: "Get Started with HelpDesk Pro 2026 Locally"
+title: "Quickstart: Clone, Configure, and Run HelpDesk Pro 2026"
 sidebarTitle: "Quickstart"
 description: "Clone the repo, configure Supabase credentials and a Postgres connection string, run the app locally, and register your first account in minutes."
 ---
@@ -69,10 +69,10 @@ This guide walks you through running HelpDesk Pro 2026 on your local machine. Yo
     ```
 
     **Move hardcoded credentials out of `SupabClient.cs`.**  
-    The current `SupabClient.cs` reads URL and key as string literals. Replace them with configuration injection:
+    The current `SupabClient.cs` reads `url` and `key` as hardcoded string literals. As a security improvement, replace them with values read from `IConfiguration` so that credentials are never stored in source files. The snippet below shows the recommended refactored version:
 
     ```csharp
-    // Services/SupabClient.cs — updated version
+    // Services/SupabClient.cs — recommended refactored version
     public static class SupabClient
     {
         private static Supabase.Client? _client;
@@ -91,9 +91,10 @@ This guide walks you through running HelpDesk Pro 2026 on your local machine. Yo
     }
     ```
 
-    Then update the singleton registration in `Program.cs`:
+    After updating `SupabClient`, also update the singleton registration in `Program.cs` to pass the configuration:
 
     ```csharp
+    // Program.cs — updated singleton registration
     builder.Services.AddSingleton<Supabase.Client>(serviceProvider =>
     {
         var config = serviceProvider.GetRequiredService<IConfiguration>();

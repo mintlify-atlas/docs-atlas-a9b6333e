@@ -1,7 +1,7 @@
 ---
 title: "ITicketService and TicketService: Full Method Reference"
 sidebarTitle: "TicketService"
-description: "Complete method reference for ITicketService and its implementation TicketService, covering catalogs, ticket CRUD, state transitions, attachments, and comments."
+description: "Full method reference for ITicketService and TicketService: catalog queries, ticket CRUD, state transitions, attachment handling, and comment operations."
 ---
 
 `ITicketService` is the primary interface for all ticket-related operations in HelpDesk Pro 2026. `TicketService` provides the concrete implementation, communicating with Supabase Postgrest via the Supabase .NET SDK. Every controller that deals with tickets — listing, creating, updating, state changes, attachments, and comments — depends on this interface, which is registered as a scoped service in `Program.cs`.

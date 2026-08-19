@@ -1,14 +1,14 @@
 ---
-title: "Admin Panel: View and Change User Roles"
+title: "SUPERUSUARIO Admin Panel: View Users and Assign Roles"
 sidebarTitle: "Admin Panel"
-description: "SUPERUSUARIO accounts can view all registered users and assign the EMPLEADO or SOPORTE role from the admin panel at /Users/Index."
+description: "SUPERUSUARIO accounts can view all registered users and change their role to EMPLEADO or SOPORTE from the admin panel at /Users/Index."
 ---
 
 The user administration panel gives SUPERUSUARIO accounts a central place to view every registered user and change their system role. Access is strictly limited to SUPERUSUARIO — any user with a different role who navigates to the panel is silently redirected to the dashboard. There is no user deletion feature; the admin panel is role management only.
 
 ## Accessing the Panel
 
-The admin panel is available at two equivalent routes:
+The admin panel is available at two routes:
 
 | Route | Controller | Action |
 |---|---|---|
@@ -27,9 +27,15 @@ if (!string.Equals(role, "SUPERUSUARIO", StringComparison.OrdinalIgnoreCase))
 }
 ```
 
+<Note>
+  The two controllers differ in their implementation details. `UsersController` delegates to `UserAdministrationService` (which calls a Supabase RPC), while `AdminUsersController` uses `UserService` for direct Postgrest queries. Both enforce the same role and session guards.
+</Note>
+
 ## Listing All Users
 
-Once access is confirmed, the controller calls `UserAdministrationService.ObtenerTodosAsync()`, which fetches every row from the `users` table via the Supabase Postgrest client and returns them as a `List<Usuario>`:
+Once access is confirmed, the controller fetches every row from the `users` table and passes it to the view, which renders a table showing each user's UID, full name, email address, and current role.
+
+`UsersController.Index` delegates to `UserAdministrationService.ObtenerTodosAsync()` and wraps the result in `AdministrarUsuariosViewModel`:
 
 ```csharp
 // Services/UserAdministrationService.cs
@@ -43,7 +49,19 @@ public async Task<List<Usuario>> ObtenerTodosAsync()
 }
 ```
 
-The results are wrapped in `AdministrarUsuariosViewModel` and passed to the view, where they are rendered as a table showing each user's UID, full name, email address, and current role.
+`AdminUsersController.Index` calls `UserService.ObtenerUsuarios()` directly and passes the `List<Usuario>` to its view:
+
+```csharp
+// Services/UserService.cs
+public async Task<List<Usuario>> ObtenerUsuarios()
+{
+    var response = await _client
+        .From<Usuario>()
+        .Get();
+
+    return response.Models;
+}
+```
 
 <Info>
   SUPERUSUARIO rows are rendered with a read-only label in the Actions column — the edit button is hidden for any user whose role is `SUPERUSUARIO`, preventing accidental role changes to privileged accounts.
@@ -51,7 +69,7 @@ The results are wrapped in `AdministrarUsuariosViewModel` and passed to the view
 
 ## Changing a User's Role
 
-Clicking the **Editar** button for any non-SUPERUSUARIO row opens a slide-in panel. Selecting a new role and confirming submits a `POST` to `/Users/CambiarRol` (or `/AdminUsers/UpdateRole` via `AdminUsersController`).
+Clicking the **Editar** button for any non-SUPERUSUARIO row opens a slide-in panel. Selecting a new role and confirming submits a `POST` to either `/Users/CambiarRol` or `/AdminUsers/UpdateRole`.
 
 <Steps>
   <Step title="Select target user">
@@ -61,7 +79,7 @@ Clicking the **Editar** button for any non-SUPERUSUARIO row opens a slide-in pan
     Select either `EMPLEADO` or `SOPORTE` from the dropdown. These are the only two assignable roles — SUPERUSUARIO cannot be granted through the UI.
   </Step>
   <Step title="Submit the change">
-    Click **Guardar cambios**. The form posts `userId` (Guid) and `role` (string) to the controller.
+    Click **Guardar cambios**. The form posts `userId` (Guid) and `role` (string) to the controller. The `CambiarRolViewModel` model carries these two fields:
 
     ```csharp
     // Models/CambiarRolViewModel.cs
@@ -76,10 +94,10 @@ Clicking the **Editar** button for any non-SUPERUSUARIO row opens a slide-in pan
     ```
   </Step>
   <Step title="Role is validated and applied">
-    The controller validates that `role` is either `"EMPLEADO"` or `"SOPORTE"`, then calls `UserAdministrationService.CambiarRolAsync()`.
+    Both controllers validate that `role` is either `"EMPLEADO"` or `"SOPORTE"` before proceeding. `UsersController.CambiarRol` then delegates to `UserAdministrationService.CambiarRolAsync()`, which executes the change via a Supabase RPC call. `AdminUsersController.UpdateRole` instead calls `UserService.CambiarRol()`, which performs a direct Postgrest update on the `users` table.
 
     ```csharp
-    // UsersController.cs — role validation
+    // UsersController.cs — role validation and RPC path
     if (role != "EMPLEADO" && role != "SOPORTE")
     {
         TempData["Error"] = "El rol seleccionado no es válido.";
@@ -90,11 +108,15 @@ Clicking the **Editar** button for any non-SUPERUSUARIO row opens a slide-in pan
     ```
   </Step>
   <Step title="Success confirmation">
-    On success, `TempData["Success"]` is set and the page redirects back to `GET /Users/Index` where a green confirmation banner is shown.
+    On success, `TempData["Success"]` is set and the page redirects back to the index where a green confirmation banner is shown.
   </Step>
 </Steps>
 
-## How CambiarRolAsync Works Internally
+## How the Role Change Is Applied Internally
+
+The two controllers use different mechanisms to persist the role change.
+
+**`UsersController` path — RPC via `UserAdministrationService.CambiarRolAsync()`**
 
 `UserAdministrationService.CambiarRolAsync()` does not update the `users` table directly. Instead, it calls a PostgreSQL function in your Supabase project via RPC:
 
@@ -118,8 +140,32 @@ public async Task CambiarRolAsync(Guid userId, string nuevoRol)
 The RPC call invokes the `admin_change_user_role` function with the target user's UUID and the new role string.
 
 <Note>
-  The `admin_change_user_role` PostgreSQL function must be created manually in your Supabase project's SQL editor. It should accept `target_user_id uuid` and `new_role text` parameters, update the `role` column in the `users` table for that user, and be granted `EXECUTE` permission to the appropriate database role (typically `authenticated` or a service role). Without this function in place, all role-change requests will fail with a Supabase RPC error.
+  The `admin_change_user_role` PostgreSQL function must be created manually in your Supabase project's SQL editor. It should accept `target_user_id uuid` and `new_role text` parameters, update the `role` column in the `users` table for that user, and be granted `EXECUTE` permission to the appropriate database role (typically `authenticated` or a service role). Without this function in place, all role-change requests through `UsersController` will fail with a Supabase RPC error.
 </Note>
+
+**`AdminUsersController` path — direct Postgrest update via `UserService.CambiarRol()`**
+
+`UserService.CambiarRol()` fetches the user record, sets the `Role` property, and persists it back through the Supabase Postgrest client — no RPC is involved:
+
+```csharp
+// Services/UserService.cs
+public async Task<bool> CambiarRol(Guid userId, string nuevoRol)
+{
+    if (nuevoRol != "EMPLEADO" && nuevoRol != "SOPORTE")
+        return false;
+
+    var usuario = await ObtenerPorId(userId);
+    if (usuario == null) return false;
+
+    usuario.Role = nuevoRol;
+
+    await _client
+        .From<Usuario>()
+        .Update(usuario);
+
+    return true;
+}
+```
 
 ## Safety Guards
 
@@ -127,7 +173,7 @@ Multiple layers of protection prevent misuse of the role-change endpoint:
 
 <CardGroup cols={2}>
   <Card title="SUPERUSUARIO self-protection" icon="lock">
-    The controller compares the `userId` in the POST body against the `UserId` in the current session. If they match, the operation is rejected — a SUPERUSUARIO cannot demote their own account.
+    `AdminUsersController.UpdateRole` compares the `userId` in the POST body against the `UserId` stored in the current session. If they match, the operation is rejected with an error — a SUPERUSUARIO cannot demote their own account through this route.
   </Card>
   <Card title="Role allowlist enforcement" icon="shield">
     Both the controller and `UserAdministrationService` validate that the requested role is exactly `"EMPLEADO"` or `"SOPORTE"`. Any other string is rejected before reaching the database.

@@ -1,5 +1,5 @@
 ---
-title: "Ticket, Comment, and Attachment Data Models"
+title: "Ticket, TicketAttachment, and Comment C# Data Models"
 sidebarTitle: "Ticket Models"
 description: "C# model definitions for the Ticket, TicketAttachment, Comment, CreateTicketViewModel, and EditTicketViewModel classes used in HelpDesk Pro 2026."
 ---
@@ -446,5 +446,5 @@ public class EditTicketViewModel
 </ResponseField>
 
 <ResponseField name="RemoveAttachment" type="bool">
-  When `true`, instructs the controller to delete all existing attachments for this ticket from both Supabase Storage and the `ticket_attachments` table before processing `NewAttachments`.
+  A flag available on the view model; individual attachment deletion is handled separately via the `DeleteAttachment` action, which removes a single `TicketAttachment` row from `ticket_attachments` and its corresponding file from Supabase Storage. `UpdateTicketAsync` does not process this field — it is reserved for view-layer use.
 </ResponseField>

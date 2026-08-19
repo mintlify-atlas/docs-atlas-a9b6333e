@@ -1,5 +1,5 @@
 ---
-title: "User Roles and Access Permissions in HelpDesk Pro"
+title: "User Roles and Access Permissions in HelpDesk Pro 2026"
 sidebarTitle: "Roles"
 description: "HelpDesk Pro 2026 has three roles — EMPLEADO, SOPORTE, and SUPERUSUARIO — each with distinct permissions for tickets, dashboard, and admin."
 ---
@@ -12,7 +12,7 @@ HelpDesk Pro 2026 uses a straightforward three-tier role system to control what 
 |---|:---:|:---:|:---:|
 | Create tickets | ✓ | ✗ | ✓ |
 | View own tickets | ✓ | All | All |
-| Edit tickets (state 1 only) | ✓ | ✓ | ✓ |
+| Edit ticket fields (EMPLEADO: state 1 only) | ✓ | ✓ (any state) | ✓ (any state) |
 | Update ticket state | ✗ | ✓ | ✓ |
 | Add / edit / delete comments | ✓ (own) | ✓ (own) | ✓ (own) |
 | View dashboard | ✗ | ✓ | ✓ |
@@ -93,7 +93,7 @@ public async Task<Session?> RegisterAsync(
 }
 ```
 
-After registration, the user is redirected to `/Account/Login`. A SUPERUSUARIO must then visit the admin panel to elevate the account to `SOPORTE` or `SUPERUSUARIO` if needed.
+After registration, the user is redirected to `/Account/Login`. A SUPERUSUARIO must then visit the admin panel to elevate the account to `SOPORTE` if needed. The `SUPERUSUARIO` role cannot be granted through the admin panel UI — it must be assigned directly in the database.
 
 ## Runtime Role Checks
 

@@ -45,7 +45,7 @@ Browser
     ```
 
     <Info>
-      The default route maps to `TicketsController.Index`, not the Home page, so authenticated users land directly on the ticket list after login.
+      The default route is `{controller=Home}/{action=Index}`, as defined in `Program.cs`. After a successful login, `AccountController` explicitly redirects to `Tickets/Index`, so authenticated users land directly on the ticket list.
     </Info>
   </Tab>
 

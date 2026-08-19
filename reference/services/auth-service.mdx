@@ -1,7 +1,7 @@
 ---
 title: "AuthService: Registration, Login, and Password Change"
 sidebarTitle: "AuthService"
-description: "AuthService wraps Supabase GoTrue Auth for user registration, sign-in, password update, and sign-out in HelpDesk Pro 2026."
+description: "AuthService wraps Supabase GoTrue for user registration, sign-in, current-password verification before change, and session sign-out."
 ---
 
 `AuthService` is a thin wrapper around `Supabase.Client.Auth` (GoTrue), the Supabase authentication engine. It exposes four async methods that cover the full authentication lifecycle: account creation, sign-in, password change with current-password verification, and sign-out. All token management and JWT issuance is handled by GoTrue internally — `AuthService` simply calls the appropriate GoTrue method and returns the result to the caller.

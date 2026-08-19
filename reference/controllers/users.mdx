@@ -138,7 +138,7 @@ Returns a flat list of all `Usuario` records.
 
 **Access:** SUPERUSUARIO only (session `Role` check; redirects to `Dashboard` if not satisfied).
 
-**Behavior:** Calls `UserService.ObtenerUsuarios()` and passes the resulting `List<Usuario>` directly to the view. If the service throws, `TempData["Error"]` is set and an empty `List<Usuario>` is passed to the view.
+**Behavior:** Calls `UserService.ObtenerUsuarios()` and passes the resulting `List<Usuario>` directly to the view. If the service throws, `TempData["Error"]` is set to `"No se pudieron obtener los usuarios."` and an empty `List<Usuario>` is passed to the view.
 
 ---
 
